@@ -1,0 +1,27 @@
+# Project workflow
+
+## Source of truth
+
+- Treat the local checkout and all existing uncommitted changes as user-owned.
+- Do not delete, reset, or overwrite modified or untracked code, data, notebooks,
+  papers, checkpoints, or plots without explicit instruction.
+- Keep large trajectories, generated results, and checkpoints outside Git. The
+  NSCC project storage is `/data/projects/11014454/depeng/`; the code checkout
+  may remain under `/home/users/nus/depeng/`.
+
+## SPIB entry points
+
+- Preliminary run: `python test_model.py ...`
+- Config-driven run: `python test_model_advanced.py -config <config.ini>`
+- The code automatically uses CUDA when `torch.cuda.is_available()` is true.
+- For NSCC batch jobs, set `SPIB_OUTPUT_DIR` and `SPIB_FIG_DIR` so generated
+  files do not consume the home quota.
+
+## Change and verification rules
+
+- Make focused changes and preserve the user's HSIC-SPIB/CTC work.
+- Before editing, inspect `git status` and the relevant diff.
+- Prefer a small smoke test or syntax check before an expensive GPU run.
+- Record the Git commit, config file, environment, GPU, random seed, and output
+  directory for every reproducible experiment.
+- Run GPU work through PBS/NSCC rather than on a login node.

@@ -1,0 +1,19 @@
+# Large trajectory / label caches (do not commit)
+trpcage/*.npy
+trpcage/**/*.npy
+!trpcage/prepare_spib_data.py
+
+muller/init_label_kmeans*.npy
+muller/init_label_tica*.npy
+muller/tica_projection*.npy
+muller/prepare_meta.json
+
+# Training outputs
+SPIB/
+fig/
+__pycache__/
+*.pt
+*.pyc
+.Python
+*.egg-info/
+.ipynb_checkpoints/
