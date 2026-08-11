@@ -1,0 +1,8 @@
+name: spib
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - pip
+  - numpy=1.26.4
+  - matplotlib=3.8.4

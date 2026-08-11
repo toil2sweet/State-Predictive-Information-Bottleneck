@@ -9,7 +9,7 @@ usage() {
 PARTITION="${1:-GPUA100}"
 CONFIG="${2:-examples/Four_Well_hsic_config.ini}"
 PROJECT_ROOT="${DNA_PROJECT_ROOT:-/mnt/rna01/lidp/spib-project}"
-ENV_PREFIX="${DNA_ENV_PREFIX:-${PROJECT_ROOT}/envs/spib-cu118}"
+ENV_PREFIX="${DNA_ENV_PREFIX:-/mnt/rna01/lidp/miniforge3/envs/spib}"
 CODE_ROOT="$(git rev-parse --show-toplevel)"
 
 if [[ $# -gt 2 ]]; then

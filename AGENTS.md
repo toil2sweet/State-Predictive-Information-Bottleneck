@@ -13,6 +13,9 @@
 - The DNA checkout is `/mnt/rna01/lidp/State-Predictive-Information-Bottleneck`;
   persistent data, environments, logs, and results belong under
   `/mnt/rna01/lidp/spib-project/`.
+- DNA uses the Miniforge base `/mnt/rna01/lidp/miniforge3`; the default SPIB
+  environment is `/mnt/rna01/lidp/miniforge3/envs/spib`. Keep MACIL in a
+  separate environment rather than adding its dependencies to SPIB.
 
 ## SPIB entry points
 

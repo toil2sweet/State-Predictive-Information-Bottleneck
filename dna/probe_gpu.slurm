@@ -10,7 +10,7 @@
 set -euo pipefail
 
 PROJECT_ROOT="${DNA_PROJECT_ROOT:-/mnt/rna01/lidp/spib-project}"
-ENV_PREFIX="${DNA_ENV_PREFIX:-${PROJECT_ROOT}/envs/spib-cu118}"
+ENV_PREFIX="${DNA_ENV_PREFIX:-/mnt/rna01/lidp/miniforge3/envs/spib}"
 
 echo "===== DNA GPU probe ====="
 date

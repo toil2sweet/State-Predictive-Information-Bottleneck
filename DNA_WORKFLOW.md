@@ -33,11 +33,12 @@ If the checkout already exists, do not clone over it. Inspect it and use
 
 ## Install the SPIB environment
 
-DNA has a shared Python 3.11 interpreter at
-`/mnt/apps/python-3.11.0/bin/python3.11`, while the login-node default Python is
-only 3.6. The installation job creates an isolated venv at
-`/mnt/rna01/lidp/spib-project/envs/spib-cu118` and installs pinned PyTorch 2.7.1
-with its CUDA 11.8 wheel, NumPy, and Matplotlib:
+Miniforge is installed at `/mnt/rna01/lidp/miniforge3`. The installation job
+uses Mamba and the tracked `dna/spib-environment.yml` specification to create
+the isolated Conda environment `/mnt/rna01/lidp/miniforge3/envs/spib`, then
+installs pinned PyTorch 2.7.1 with its CUDA 11.8 wheel. The Miniforge package
+cache is shared by future environments such as `macil`, but their dependencies
+remain isolated:
 
 ```bash
 cd /mnt/rna01/lidp/State-Predictive-Information-Bottleneck
@@ -59,7 +60,13 @@ sbatch -p GPUA40 \
 ```
 
 The probe must report `cuda_available=True` and complete a small CUDA tensor
-operation before training is submitted.
+operation before training is submitted. Do not use `conda init` on DNA; for a
+manual shell, activate this environment with:
+
+```bash
+source /mnt/rna01/lidp/miniforge3/etc/profile.d/conda.sh
+conda activate spib
+```
 
 ## Normal edit-to-run cycle
 

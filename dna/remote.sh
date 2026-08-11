@@ -14,7 +14,7 @@ Usage: dna/remote.sh COMMAND [ARGS]
 Commands:
   probe                              Show DNA GPU partitions and your jobs
   update                             Fast-forward DNA to pushed hsic-spib HEAD
-  install-env                        Submit the spib-cu118 environment job
+  install-env                        Submit the Miniforge spib environment job
   probe-gpu GPUA100|GPUA40           Submit a short PyTorch/GPU check
   submit GPUA100|GPUA40 [config.ini] Submit a commit-bound SPIB run
   status                             Show your DNA Slurm jobs

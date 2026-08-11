@@ -13,7 +13,7 @@ set -euo pipefail
 CODE_ROOT="${DNA_CODE_ROOT:-/mnt/rna01/lidp/State-Predictive-Information-Bottleneck}"
 PROJECT_ROOT="${DNA_PROJECT_ROOT:-/mnt/rna01/lidp/spib-project}"
 DATA_ROOT="${DNA_DATA_ROOT:-${PROJECT_ROOT}/data}"
-ENV_PREFIX="${DNA_ENV_PREFIX:-${PROJECT_ROOT}/envs/spib-cu118}"
+ENV_PREFIX="${DNA_ENV_PREFIX:-/mnt/rna01/lidp/miniforge3/envs/spib}"
 CONFIG="${CONFIG:-examples/Four_Well_hsic_config.ini}"
 COMMIT="${SPIB_GIT_COMMIT:?SPIB_GIT_COMMIT must be a full Git commit}"
 RUN_ID="${SLURM_JOB_ID:?This script must run through sbatch}"
