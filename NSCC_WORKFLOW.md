@@ -24,7 +24,7 @@ git diff -- SPIB.py SPIB_training.py test_model.py test_model_advanced.py
 ```
 
 Because `origin` currently points to the upstream repository, do not push your
-modified `main` branch to `origin`. Create a personal fork/private repository
+modified `hsic-spib` branch to `origin`. Create a personal fork/private repository
 and add it as a second remote once:
 
 ```bash
@@ -39,7 +39,7 @@ results are unreviewed:
 git add -p SPIB.py SPIB_training.py test_model.py test_model_advanced.py
 git add examples/*.ini hsic_utils.py plot_*.py nscc/ AGENTS.md NSCC_WORKFLOW.md
 git commit -m "Extend SPIB with HSIC and NSCC workflow"
-git push -u personal main
+git push -u personal hsic-spib
 ```
 
 For later Codex iterations, use a small commit per logical change. A previous
@@ -60,7 +60,8 @@ results):
 
 ```bash
 mkdir -p /data/projects/11014454/depeng/{data,results,logs}
-git clone git@github.com:<your-account>/State-Predictive-Information-Bottleneck.git \
+git clone --branch hsic-spib --single-branch \
+  git@github.com:<your-account>/State-Predictive-Information-Bottleneck.git \
   /home/users/nus/depeng/State-Predictive-Information-Bottleneck
 cd /home/users/nus/depeng/State-Predictive-Information-Bottleneck
 git remote -v
@@ -76,12 +77,13 @@ For a config that refers to project data, use absolute NSCC paths such as
 
 ```bash
 cd /home/users/nus/depeng/State-Predictive-Information-Bottleneck
-NSCC_GIT_REMOTE=personal NSCC_GIT_BRANCH=main nscc/update_code.sh
+NSCC_GIT_REMOTE=personal NSCC_GIT_BRANCH=hsic-spib nscc/update_code.sh
 ```
 
-The helper refuses to pull when the NSCC checkout has local edits, so it cannot
-silently overwrite a server-side experiment change. Resolve or remove those
-changes deliberately, then run the update again.
+The helper defaults to `personal/hsic-spib`, switches an older `main` checkout
+to the `hsic-spib` branch, and then permits only a fast-forward update. It
+refuses to pull over tracked server-side edits. Resolve those edits deliberately,
+then run the update again; untracked datasets are left untouched.
 
 ## 4. Verify the environment in a short GPU interactive job
 

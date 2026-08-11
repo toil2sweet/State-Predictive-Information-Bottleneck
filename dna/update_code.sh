@@ -1,15 +1,16 @@
 #!/usr/bin/env bash
+
 set -euo pipefail
 
-CODE_ROOT="${NSCC_CODE_ROOT:-/home/users/nus/depeng/State-Predictive-Information-Bottleneck}"
-REMOTE="${NSCC_GIT_REMOTE:-personal}"
-BRANCH="${NSCC_GIT_BRANCH:-hsic-spib}"
+CODE_ROOT="${DNA_CODE_ROOT:-/mnt/rna01/lidp/State-Predictive-Information-Bottleneck}"
+REMOTE="${DNA_GIT_REMOTE:-personal}"
+BRANCH="${DNA_GIT_BRANCH:-hsic-spib}"
 REMOTE_REF="refs/remotes/${REMOTE}/${BRANCH}"
 
 cd "${CODE_ROOT}"
 if ! git diff --quiet || ! git diff --cached --quiet; then
-    echo "NSCC checkout has tracked local changes; refusing to pull over them." >&2
-    git status --short
+    echo "DNA checkout has tracked local changes; refusing to update it." >&2
+    git status --short --untracked-files=no
     exit 1
 fi
 
@@ -19,7 +20,7 @@ git fetch "${REMOTE}" \
 
 current_branch="$(git symbolic-ref --quiet --short HEAD || true)"
 if [[ "${current_branch}" != "${BRANCH}" ]]; then
-    echo "Switching NSCC checkout from ${current_branch:-detached HEAD} to ${BRANCH}."
+    echo "Switching DNA checkout from ${current_branch:-detached HEAD} to ${BRANCH}."
     if git show-ref --verify --quiet "refs/heads/${BRANCH}"; then
         git checkout "${BRANCH}"
     else
@@ -28,4 +29,4 @@ if [[ "${current_branch}" != "${BRANCH}" ]]; then
 fi
 
 git merge --ff-only "${REMOTE}/${BRANCH}"
-git log -1 --oneline --decorate
+git rev-parse HEAD
