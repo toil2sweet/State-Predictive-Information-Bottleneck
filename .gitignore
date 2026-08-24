@@ -8,6 +8,20 @@ muller/init_label_tica*.npy
 muller/tica_projection*.npy
 muller/prepare_meta.json
 
+# Generated analytical-potential trajectories and labels
+traj_gen/*.npy
+muller/*.npy
+double-well_CTC/*.npy
+double-well_CTC/*.npz
+double-well_CTC/*.h5
+double-well_CTC/transition_state_*.png
+
+# Local papers and external reference checkouts
+*.pdf
+HSIC-bottleneck/
+spib_msm/
+ts-dar/
+
 # Training outputs
 SPIB/
 fig/
@@ -17,3 +31,6 @@ __pycache__/
 .Python
 *.egg-info/
 .ipynb_checkpoints/
+
+# macOS metadata
+.DS_Store

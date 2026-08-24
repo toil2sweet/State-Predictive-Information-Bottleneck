@@ -1,0 +1,4 @@
+interface:
+  display_name: "SPIB → HKU Runner"
+  short_description: "在港大 GPU 农场同步并交互执行 HSIC-SPIB"
+  default_prompt: "Use $spib-hku-runner to sync the local HSIC-SPIB tree to the HKU TS checkout and run it through gpu-interactive."

@@ -8,6 +8,10 @@ Three complementary figures (after decoder-K_i TS detection):
      style on Four-Well V; all detected TS frames, not top-k)
 """
 import os
+import importlib.util
+from functools import lru_cache
+from pathlib import Path
+
 import numpy as np
 import matplotlib
 matplotlib.use("Agg")
@@ -15,6 +19,34 @@ import matplotlib.pyplot as plt
 from matplotlib import colors as c
 
 import plot_state_labels
+
+
+FOUR_WELL_CODE_DIR = Path(__file__).resolve().parent / "four-well_SPIB"
+DOUBLE_WELL_CODE_DIR = Path(__file__).resolve().parent / "double-well_CTC"
+
+
+@lru_cache(maxsize=None)
+def _load_dir_module(code_dir, module_name):
+    """Load a plotting utility from a non-package directory."""
+    code_path = Path(code_dir)
+    module_path = code_path / (module_name + ".py")
+    spec = importlib.util.spec_from_file_location(
+        "%s_%s" % (code_path.name, module_name), module_path)
+    if spec is None or spec.loader is None:
+        raise ImportError("Cannot load plotting utility: %s" % module_path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _load_four_well_module(module_name):
+    """Load a Four-Well utility from its non-package directory."""
+    return _load_dir_module(str(FOUR_WELL_CODE_DIR), module_name)
+
+
+def _load_double_well_module(module_name):
+    """Load a double-well CTC utility from its non-package directory."""
+    return _load_dir_module(str(DOUBLE_WELL_CODE_DIR), module_name)
 
 
 def potential_fn_four_well_1d(x):
@@ -29,8 +61,8 @@ def potential_fn_four_well_1d(x):
 
 
 def potential_fn_four_well_2d(x, y, k_y=1.0):
-    """2D extension for CTC-style potential heatmap: V(x) + 0.5 k_y y^2."""
-    return potential_fn_four_well_1d(x) + 0.5 * k_y * (y ** 2)
+    """SPIB four-well U(x, y) = U_1D(x) + k_y y^2 (k_y=1 matches generate_four_well)."""
+    return potential_fn_four_well_1d(x) + k_y * (y ** 2)
 
 
 def potential_fn_double_well_2d(x, y):
@@ -141,18 +173,24 @@ def plot_labels_with_ts(traj_data, traj_labels, ts_mask, save_path,
 
 def plot_free_energy_with_ts(traj_data, ts_mask, save_path,
                              bins=100, fe_beta=3.0, title=None, dpi=150,
-                             vmax=3.0, n_levels=20):
+                             vmax=3.0, n_levels=20, recipe="clipped",
+                             xlim=None, ylim=None):
     """
     Free-energy landscape + TS overlay.
 
-    Tuned toward SPIB paper Fig.5(b):
-        F = -log(P)/fe_beta on sampled bins (shifted to min 0)
-        unsampled bins -> vmax (dark-red sea, as in the paper figure)
-        sampled bins with F > vmax are clipped to vmax (avoids white gaps
-        from contourf leaving values outside levels uncolored)
-        denser contour bands on [0, vmax] (default 20) so wells stand out
-    Colorbar: vertical on the right, ticks 0..vmax.
+    ``recipe="spib_demo"`` follows
+    ``four-well_SPIB/plot_free_energy_likeSPIB.py`` / SPIB Fig. 5(b): empty
+    bins filled with the smallest nonzero count, ``contourf`` with 5 levels,
+    horizontal colorbar on top.
+
+    ``recipe="clipped"`` (default, Müller-style): unsampled bins and F>vmax
+    are clipped to vmax so contourf has no white holes.
     """
+    if recipe in ("spib_demo", "spib"):
+        return _plot_free_energy_with_ts_spib(
+            traj_data, ts_mask, save_path, bins=bins, fe_beta=fe_beta,
+            title=title, dpi=None, xlim=xlim, ylim=ylim)
+
     traj_data = np.asarray(traj_data)
     counts, xedges, yedges = np.histogram2d(
         traj_data[:, 0], traj_data[:, 1], bins=bins)
@@ -200,6 +238,122 @@ def plot_free_energy_with_ts(traj_data, ts_mask, save_path,
     return save_path, n_ts
 
 
+def _plot_free_energy_with_ts_spib(traj_data, ts_mask, save_path,
+                                   bins=100, fe_beta=3.0, title=None, dpi=None,
+                                   xlim=None, ylim=None):
+    """SPIB Fig. 5(b) free-energy map with HSIC-SPIB TS frames overlaid.
+
+    The background is the same as
+    ``four-well_SPIB/plot_free_energy_likeSPIB.py::_draw_free_energy``:
+    histogram extent, 5-level jet ``contourf``, top colorbar. Axis limits
+    stay on that extent unless the caller passes ``xlim`` / ``ylim``.
+    """
+    spib_fe = _load_four_well_module("plot_free_energy_likeSPIB")
+
+    traj_data = np.asarray(traj_data)
+    x_ts, y_ts, n_ts = _ts_xy(traj_data, ts_mask)
+    free_energy, xedges, yedges = spib_fe.empirical_free_energy(
+        traj_data, bins=bins, beta=fe_beta)
+    if dpi is None:
+        dpi = spib_fe.DPI
+
+    with matplotlib.rc_context():
+        spib_fe._configure_matplotlib()
+        fig, ax = plt.subplots(figsize=spib_fe.FREE_ENERGY_FIGSIZE)
+        spib_fe._draw_free_energy(fig, ax, free_energy, xedges, yedges)
+        if xlim is not None:
+            ax.set_xlim(xlim)
+        if ylim is not None:
+            ax.set_ylim(ylim)
+        _scatter_ts(
+            ax, x_ts, y_ts, s=50 if n_ts <= 80 else 22,
+            zorder=3, linewidths=1.0)
+        if title:
+            ax.set_title(title)
+        os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
+        fig.tight_layout()
+        fig.savefig(save_path, dpi=dpi, bbox_inches="tight", pad_inches=0.02)
+        plt.close(fig)
+    return save_path, n_ts
+
+
+def _plot_four_well_potential_with_ts(
+        traj_data, ts_mask, save_path, x_ts, y_ts, n_ts,
+        grid_n=None, title=None, dpi=None,
+        clim=None, x_range=None, y_range=None):
+    """CTC-style four-well U(x, y) with HSIC-SPIB TS frames overlaid.
+
+    The background is
+    ``four-well_SPIB/plot_energy_landscape_likeCTC.py`` with that script's
+    default window, clim, grid, and colorbar.
+    """
+    ctc_land = _load_four_well_module("plot_energy_landscape_likeCTC")
+
+    if x_range is None:
+        x_range = ctc_land.DEFAULT_XLIM
+    if y_range is None:
+        y_range = ctc_land.DEFAULT_YLIM
+    if clim is None:
+        clim = ctc_land.FOUR_WELL_CLIM
+    if grid_n is None:
+        grid_n = ctc_land.CTC_GRID_N
+    figsize, _ = ctc_land.window_figsize(x_range, y_range)
+    dpi = ctc_land.DPI
+
+    with matplotlib.rc_context():
+        ctc_land._configure_matplotlib()
+        fig, ax = plt.subplots(figsize=figsize)
+        ctc_land.draw_four_well_potential_like_ctc(
+            fig, ax, x_range, y_range, grid_n=grid_n, clim=clim)
+        _scatter_ts(
+            ax, x_ts, y_ts, s=50 if n_ts <= 80 else 22,
+            zorder=3, linewidths=1.0)
+        if title:
+            ax.set_title(title)
+        os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
+        fig.savefig(save_path, dpi=dpi, bbox_inches="tight", pad_inches=0.02)
+        plt.close(fig)
+    return save_path, n_ts
+
+
+def _plot_double_well_potential_with_ts(
+        traj_data, ts_mask, save_path, x_ts, y_ts, n_ts,
+        grid_n=None, title=None, dpi=None,
+        clim=None, x_range=None, y_range=None):
+    """CTC-style double-well V(x, y) with HSIC-SPIB TS frames overlaid.
+
+    The background is
+    ``double-well_CTC/plot_energy_landscape_likeCTC.py`` with that script's
+    default window, clim, grid, and colorbar.
+    """
+    ctc_land = _load_double_well_module("plot_energy_landscape_likeCTC")
+
+    if x_range is None:
+        x_range = ctc_land.DEFAULT_XLIM
+    if y_range is None:
+        y_range = ctc_land.DEFAULT_YLIM
+    if clim is None:
+        clim = ctc_land.DEFAULT_CLIM
+    if grid_n is None:
+        grid_n = ctc_land.GRID_N
+    dpi = ctc_land.DPI
+
+    with matplotlib.rc_context():
+        ctc_land._configure_matplotlib()
+        fig, ax = plt.subplots(figsize=ctc_land.FIGSIZE)
+        ctc_land.draw_double_well_potential_like_ctc(
+            fig, ax, x_range, y_range, grid_n=grid_n, clim=clim)
+        _scatter_ts(
+            ax, x_ts, y_ts, s=50 if n_ts <= 80 else 22,
+            zorder=3, linewidths=1.0)
+        if title:
+            ax.set_title(title)
+        os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
+        fig.savefig(save_path, dpi=dpi, bbox_inches="tight", pad_inches=0.01)
+        plt.close(fig)
+    return save_path, n_ts
+
+
 def plot_potential_with_ts(traj_data, ts_mask, save_path,
                            potential="four_well", grid_n=401,
                            title=None, dpi=150,
@@ -207,41 +361,26 @@ def plot_potential_with_ts(traj_data, ts_mask, save_path,
     """
     Analytical potential heatmap + all detected TS frames.
 
-    Visual style aligned with CTC paper Fig.2(F) / transition_state.ipynb
-    (imshow jet + clim + white contours + white-face TS markers).
-    For Four-Well (option A): still use four-well V(x)+0.5 y^2, not double-well V.
-    Supported potentials: four_well | double_well | muller.
+    Four-well uses ``four-well_SPIB/plot_energy_landscape_likeCTC.py``.
+    Double-well uses ``double-well_CTC/plot_energy_landscape_likeCTC.py``.
+    Müller keeps the previous imshow + white-contour recipe.
     """
     traj_data = np.asarray(traj_data)
     x_ts, y_ts, n_ts = _ts_xy(traj_data, ts_mask)
 
     if potential in ("four_well", "fw"):
-        # Domain covering Four-Well basins (SPIB Demo x in ~[-1,1])
-        if x_range is None:
-            x_range = (-1.2, 1.2)
-        if y_range is None:
-            y_range = (-1.6, 1.6)
-        pot_fn = potential_fn_four_well_2d
-        pot_name = "Four-Well V(x,y)"
-        # Clip color scale so wells (blue) vs barriers (red) are sharp
-        if clim is None:
-            clim = (0.3, 2.0)
-        n_contour = 30
-        fig_size = [14 / 1.2, 5 / 1.2]
-        aspect = "auto"
-    elif potential in ("double_well", "dw"):
-        if x_range is None:
-            x_range = (-4.0, 4.0)
-        if y_range is None:
-            y_range = (-7.0, 7.0)
-        pot_fn = potential_fn_double_well_2d
-        pot_name = "Double-Well V(x,y)"
-        if clim is None:
-            clim = (-10.0, 10.0)
-        n_contour = 30
-        fig_size = [14 / 1.2, 5 / 1.2]
-        aspect = "auto"
-    elif potential in ("muller", "muller_brown", "mb"):
+        return _plot_four_well_potential_with_ts(
+            traj_data, ts_mask, save_path, x_ts, y_ts, n_ts,
+            grid_n=grid_n, title=None, dpi=dpi,
+            clim=clim, x_range=x_range, y_range=y_range)
+
+    if potential in ("double_well", "dw"):
+        return _plot_double_well_potential_with_ts(
+            traj_data, ts_mask, save_path, x_ts, y_ts, n_ts,
+            grid_n=grid_n, title=None, dpi=dpi,
+            clim=clim, x_range=x_range, y_range=y_range)
+
+    if potential in ("muller", "muller_brown", "mb"):
         # TS-DAR / paper domain for Müller Brownian trajectory (T≈0.9)
         if x_range is None:
             x_range = (-1.5, 1.2)
@@ -311,14 +450,20 @@ def plot_all_ts_figures(traj_data, traj_labels, ts_mask, fig_dir, name_prefix,
     ``potential`` should be ``four_well``, ``double_well``, or ``muller``.
     If None/empty, the potential+TS figure is skipped.
 
-    ``*_free_energy_with_TS.png`` always uses empirical F=-log(P)/fe_beta from
-    the given trajectory.
-    ``*_potential_with_TS.png`` uses the analytical V for the chosen system.
+    ``*_free_energy_with_TS.png`` uses empirical F=-log(P)/fe_beta.
+    Four-well follows ``four-well_SPIB/plot_free_energy_likeSPIB.py``
+    (Fig. 5(b)).
+    ``*_potential_with_TS.png`` uses the analytical V; four-well follows
+    ``four-well_SPIB/plot_energy_landscape_likeCTC.py`` and double-well
+    follows ``double-well_CTC/plot_energy_landscape_likeCTC.py``.
 
     Returns list of (kind, path, n_ts).
     """
     os.makedirs(fig_dir, exist_ok=True)
     results = []
+    four_well = potential in ("four_well", "fw")
+    double_well = potential in ("double_well", "dw")
+    ctc_potential = four_well or double_well
 
     p1 = os.path.join(fig_dir, name_prefix + "_labels_with_TS.png")
     path, n_ts = plot_labels_with_ts(
@@ -337,14 +482,17 @@ def plot_all_ts_figures(traj_data, traj_labels, ts_mask, fig_dir, name_prefix,
     p2 = os.path.join(fig_dir, name_prefix + "_free_energy_with_TS.png")
     path, n_ts = plot_free_energy_with_ts(
         traj_data, ts_mask, p2, fe_beta=fe_beta, dpi=dpi, vmax=fe_vmax,
-        title="Free energy + TS (n_TS=%d)" % int(np.sum(ts_mask)))
+        recipe="spib_demo" if four_well else "clipped",
+        title=None if four_well else (
+            "Free energy + TS (n_TS=%d)" % int(np.sum(ts_mask))))
     results.append(("free_energy_with_TS", path, n_ts))
 
     if potential is not None and str(potential).strip() != "":
         p3 = os.path.join(fig_dir, name_prefix + "_potential_with_TS.png")
         path, n_ts = plot_potential_with_ts(
             traj_data, ts_mask, p3, potential=potential, dpi=dpi,
-            title="Potential + TS (n_TS=%d)" % int(np.sum(ts_mask)))
+            title=None if ctc_potential else (
+                "Potential + TS (n_TS=%d)" % int(np.sum(ts_mask))))
         results.append(("potential_with_TS", path, n_ts))
 
     return results

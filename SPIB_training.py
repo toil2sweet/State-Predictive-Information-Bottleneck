@@ -289,7 +289,8 @@ def save_and_report_transition_states(prediction_path, population_path=None,
 # Loss function
 # ------------------------------------------------------------------------------
 
-def calculate_loss(IB, data_inputs, data_targets, data_weights, beta=1.0, hsic_config=None):
+def calculate_loss(IB, data_inputs, data_targets, data_weights, beta=1.0, hsic_config=None,
+                   compute_kl=None):
     """
     Multi-mode loss for SPIB / HSIC-SPIB.
 
@@ -303,18 +304,24 @@ def calculate_loss(IB, data_inputs, data_targets, data_weights, beta=1.0, hsic_c
     outputs, z_sample, z_mean, z_logvar = IB.forward(
         data_inputs, decoder_on_mean=decoder_on_mean)
 
-    # KL Divergence (still computed for logging; may be excluded from total loss)
-    log_p = IB.log_p(z_sample)
-    log_q = -0.5 * torch.sum(z_logvar + torch.pow(z_sample - z_mean, 2)
-                             / torch.exp(z_logvar), dim=1)
-
     if data_weights is None:
         reconstruction_error = torch.mean(torch.sum(-data_targets * outputs, dim=1))
-        kl_loss = torch.mean(log_q - log_p)
     else:
         reconstruction_error = torch.mean(
             data_weights * torch.sum(-data_targets * outputs, dim=1))
-        kl_loss = torch.mean(data_weights * (log_q - log_p))
+
+    if compute_kl is None:
+        compute_kl = cfg["_use_kl"]
+    if compute_kl:
+        log_p = IB.log_p(z_sample)
+        log_q = -0.5 * torch.sum(z_logvar + torch.pow(z_sample - z_mean, 2)
+                                 / torch.exp(z_logvar), dim=1)
+        if data_weights is None:
+            kl_loss = torch.mean(log_q - log_p)
+        else:
+            kl_loss = torch.mean(data_weights * (log_q - log_p))
+    else:
+        kl_loss = outputs.new_zeros(())
 
     hsic_zx = data_inputs.new_zeros(())
     hsic_zy = data_inputs.new_zeros(())
@@ -330,17 +337,17 @@ def calculate_loss(IB, data_inputs, data_targets, data_weights, beta=1.0, hsic_c
         z_for_hsic = z_mean
         x_flat = torch.flatten(data_inputs, start_dim=1)
 
-        hsic_zx, _, _ = hsic_utils.compute_hsic(
-            z_for_hsic, x_flat,
-            kernel_z=cfg["kernel_z"], kernel_other=cfg["kernel_x"],
-            sigma_z=cfg["sigma_z"], sigma_other=cfg["sigma_x"],
-            normalized=cfg["normalized_hsic"], detach_other=True)
-
-        hsic_zy, _, _ = hsic_utils.compute_hsic(
-            z_for_hsic, data_targets,
-            kernel_z=cfg["kernel_z"], kernel_other=cfg["kernel_y"],
-            sigma_z=cfg["sigma_z"], sigma_other=cfg["sigma_y"],
-            normalized=cfg["normalized_hsic"], detach_other=True)
+        kz, _ = hsic_utils.build_kernel(
+            z_for_hsic, kernel_type=cfg["kernel_z"],
+            sigma=cfg["sigma_z"], detach_kernel=False)
+        kx, _ = hsic_utils.build_kernel(
+            x_flat, kernel_type=cfg["kernel_x"],
+            sigma=cfg["sigma_x"], detach_kernel=True)
+        ky, _ = hsic_utils.build_kernel(
+            data_targets, kernel_type=cfg["kernel_y"],
+            sigma=cfg["sigma_y"], detach_kernel=True)
+        hsic_zx = hsic_utils.hsic_from_grams(kz, kx, normalized=cfg["normalized_hsic"])
+        hsic_zy = hsic_utils.hsic_from_grams(kz, ky, normalized=cfg["normalized_hsic"])
 
     loss = reconstruction_error
     if cfg["_use_kl"]:
@@ -369,10 +376,19 @@ def sample_minibatch(past_data, data_labels, data_weights, indices, device):
     return sample_past_data, sample_data_labels, sample_data_weights
 
 
+def _epoch_sample_count(n_train, batch_size, epoch_sample_size):
+    """Number of SGD samples this epoch, rounded down to a full minibatch."""
+    n_use = int(n_train)
+    if epoch_sample_size and int(epoch_sample_size) > 0:
+        n_use = min(n_use, int(epoch_sample_size))
+    n_use = (n_use // batch_size) * batch_size
+    return n_use
+
+
 def train(IB, beta, train_past_data, train_future_data, init_train_data_labels, train_data_weights, \
           test_past_data, test_future_data, init_test_data_labels, test_data_weights, \
               learning_rate, lr_scheduler_step_size, lr_scheduler_gamma, batch_size, threshold, patience, refinements, output_path, log_interval, device, index,
-              hsic_config=None):
+              hsic_config=None, epoch_sample_size=0):
     IB.train()
     cfg = _resolve_hsic_config(hsic_config, beta)
     
@@ -384,12 +400,21 @@ def train(IB, beta, train_past_data, train_future_data, init_train_data_labels, 
     os.makedirs(os.path.dirname(IB_path), exist_ok=True)
 
     eps_rho = float(cfg.get("eps_rho", 0.0))
+    n_train = len(train_past_data)
+    n_epoch_samples = _epoch_sample_count(n_train, batch_size, epoch_sample_size)
+    if n_epoch_samples < batch_size:
+        raise ValueError(
+            "Not enough training samples for batch_size=%d (n_train=%d, epoch_sample_size=%s)"
+            % (batch_size, n_train, epoch_sample_size))
     print("loss_mode=%s lambda_y=%s beta_x=%s beta_kl=%s normalized_hsic=%s "
-          "decoder_on_mean=%s eps_rho=%s encoder_var_mode=%s" % (
+          "decoder_on_mean=%s eps_rho=%s encoder_var_mode=%s epoch_sample_size=%d/%d" % (
         cfg["loss_mode"], cfg["lambda_y"], cfg["beta_x"], cfg["beta_kl"],
         cfg["normalized_hsic"], cfg["decoder_on_mean"], eps_rho,
-        getattr(IB, "encoder_var_mode", cfg.get("encoder_var_mode", "input_dependent"))),
+        getattr(IB, "encoder_var_mode", cfg.get("encoder_var_mode", "input_dependent")),
+        n_epoch_samples, n_train),
           file=open(log_path, 'a'))
+    print("SGD samples/epoch=%d of %d train frames (labels/TS still use all data)"
+          % (n_epoch_samples, n_train))
     
     train_data_labels = init_train_data_labels
     test_data_labels = init_test_data_labels
@@ -413,15 +438,12 @@ def train(IB, beta, train_past_data, train_future_data, init_train_data_labels, 
 
     while True:
         
-        train_permutation = torch.randperm(len(train_past_data))
+        train_permutation = torch.randperm(n_train)[:n_epoch_samples]
         test_permutation = torch.randperm(len(test_past_data))
         
         
-        for i in range(0, len(train_past_data), batch_size):
+        for i in range(0, n_epoch_samples, batch_size):
             step += 1
-            
-            if i+batch_size>len(train_past_data):
-                break
             
             train_indices = train_permutation[i:i+batch_size]
             
@@ -436,7 +458,7 @@ def train(IB, beta, train_past_data, train_future_data, init_train_data_labels, 
                 return True
     
             optimizer.zero_grad()
-            loss.backward(retain_graph=True)
+            loss.backward()
             optimizer.step()
             
             if step % 500 == 0:
@@ -446,7 +468,8 @@ def train(IB, beta, train_past_data, train_future_data, init_train_data_labels, 
                                                                                train_data_weights, train_indices, device)
                             
                     loss, reconstruction_error, kl_loss, hsic_zx, hsic_zy = calculate_loss(
-                        IB, batch_inputs, batch_outputs, batch_weights, beta, hsic_config=cfg)
+                        IB, batch_inputs, batch_outputs, batch_weights, beta, hsic_config=cfg,
+                        compute_kl=True)
                     train_time = time.time() - start
             
                     print(
@@ -468,7 +491,8 @@ def train(IB, beta, train_past_data, train_future_data, init_train_data_labels, 
                                                                                test_data_weights, test_indices, device)
                     
                     loss, reconstruction_error, kl_loss, hsic_zx, hsic_zy = calculate_loss(
-                        IB, batch_inputs, batch_outputs, batch_weights, beta, hsic_config=cfg)
+                        IB, batch_inputs, batch_outputs, batch_weights, beta, hsic_config=cfg,
+                        compute_kl=True)
 
                     train_time = time.time() - start
                     print(

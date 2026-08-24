@@ -72,6 +72,14 @@ def test_model_advanced():
 
         # Minimum refinements
         refinements = int(config.get("Training Parameters","refinements"))
+
+        # Optional SGD subset per epoch. 0 / omitted = use all training frames.
+        # Label refinement, state-number, and TS detection still use the full data.
+        epoch_sample_size = 0
+        if config.has_option("Training Parameters", "epoch_sample_size"):
+            epoch_sample_raw = config.get("Training Parameters", "epoch_sample_size")
+            if epoch_sample_raw is not None and str(epoch_sample_raw).strip():
+                epoch_sample_size = int(epoch_sample_raw)
             
         # By default, we save the model every 10000 steps
         log_interval = int(config.get("Training Parameters","log_interval"))
@@ -133,7 +141,7 @@ def test_model_advanced():
         # Path to the trajectory data
         traj_data_path = config.get("Data","traj_data")
         traj_data_path = traj_data_path.replace('[','').replace(']','')
-        traj_data_path = traj_data_path.split(',')
+        traj_data_path = [os.path.expandvars(path.strip()) for path in traj_data_path.split(',')]
 
         # Load the data
         traj_data_list = [torch.from_numpy(np.load(file_path)).float().to(device) for file_path in traj_data_path]
@@ -144,15 +152,15 @@ def test_model_advanced():
             mean_path = config.get("Data", "data_mean")
             std_path = config.get("Data", "data_std")
             if mean_path is not None and std_path is not None:
-                mean_path = str(mean_path).strip()
-                std_path = str(std_path).strip()
+                mean_path = os.path.expandvars(str(mean_path).strip())
+                std_path = os.path.expandvars(str(std_path).strip())
                 if mean_path and std_path:
                     data_transform = SPIB.DataNormalize(np.load(mean_path), np.load(std_path))
         
         # Path to the initial state labels
         initial_labels_path = config.get("Data","initial_labels")
         initial_labels_path = initial_labels_path.replace('[','').replace(']','')
-        initial_labels_path = initial_labels_path.split(',')
+        initial_labels_path = [os.path.expandvars(path.strip()) for path in initial_labels_path.split(',')]
         
         traj_labels_list = [torch.from_numpy(np.load(file_path)).float().to(device) for file_path in initial_labels_path]
         
@@ -167,7 +175,7 @@ def test_model_advanced():
             IB_path = os.path.join(base_path, "Unweighted")
         else:
             traj_weights_path = traj_weights_path.replace('[','').replace(']','')
-            traj_weights_path = traj_weights_path.split(',')
+            traj_weights_path = [os.path.expandvars(path.strip()) for path in traj_weights_path.split(',')]
         
             traj_weights_list = [torch.from_numpy(np.load(file_path)).float().to(device) for file_path in traj_weights_path]
             IB_path = os.path.join(base_path, "Weighted")
@@ -278,7 +286,8 @@ def test_model_advanced():
                                                                 train_data_labels, train_data_weights, test_past_data, test_future_data, \
                                                                     test_data_labels, test_data_weights, learning_rate, lr_scheduler_step_size, lr_scheduler_gamma,\
                                                                         batch_size, threshold, patience, refinements, output_path, \
-                                                                            log_interval, device, seed, hsic_config=run_hsic_config)
+                                                                            log_interval, device, seed, hsic_config=run_hsic_config,
+                                                                            epoch_sample_size=epoch_sample_size)
                                 
                                 if train_result:
                                     return

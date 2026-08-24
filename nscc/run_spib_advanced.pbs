@@ -6,15 +6,19 @@
 #PBS -l walltime=04:00:00
 #PBS -j oe
 
-# Submit from the NSCC checkout with, for example:
-# qsub -v CONFIG=examples/Four_Well_hsic_config.ini nscc/run_spib_advanced.pbs
+# Prefer nscc/submit_job.sh so the submitted job receives an immutable source
+# snapshot. Direct qsub remains available for exceptional manual runs.
 
 set -euo pipefail
 
 CODE_ROOT="${NSCC_CODE_ROOT:-/home/users/nus/depeng/State-Predictive-Information-Bottleneck}"
 PROJECT_ROOT="${NSCC_PROJECT_ROOT:-/data/projects/11014454/depeng}"
-ENV_PREFIX="${NSCC_ENV_PREFIX:-${PROJECT_ROOT}/envs/macil}"
+ENV_PREFIX="${NSCC_ENV_PREFIX:-${PROJECT_ROOT}/envs/spib}"
 CONFIG="${CONFIG:-examples/Four_Well_hsic_config.ini}"
+SOURCE_MODE="${SPIB_SOURCE_MODE:-manual}"
+SOURCE_COMMIT="${SPIB_GIT_COMMIT:-}"
+CODE_VERSION="${SPIB_CODE_VERSION:-}"
+PBS_SCRIPT_SOURCE="${SPIB_PBS_SCRIPT_SOURCE:-${CODE_ROOT}/nscc/run_spib_advanced.pbs}"
 RUN_ID="${PBS_JOBID:-manual}"
 LOG_ROOT="${PROJECT_ROOT}/logs/spib"
 OUTPUT_ROOT="${PROJECT_ROOT}/results/spib/${RUN_ID}"
@@ -28,14 +32,24 @@ fi
 
 [[ -d "${CODE_ROOT}" ]] || { echo "Missing NSCC code checkout: ${CODE_ROOT}" >&2; exit 1; }
 [[ -f "${CONFIG_PATH}" ]] || { echo "Missing config file: ${CONFIG_PATH}" >&2; exit 1; }
+[[ -x "${ENV_PREFIX}/bin/python" ]] || { echo "Missing SPIB environment: ${ENV_PREFIX}" >&2; exit 1; }
 mkdir -p "${LOG_ROOT}" "${OUTPUT_ROOT}"
 
 # Keep the complete run log in project storage instead of relying on the
 # scheduler's default output location under the submission directory.
 exec >>"${LOG_FILE}" 2>&1
 
+finish() {
+    local status=$?
+    trap - EXIT
+    echo "exit_status=${status}"
+    echo "finished_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    exit "${status}"
+}
+trap finish EXIT
+
 cd "${CODE_ROOT}"
-module load miniforge3/24.3.0
+module load "${NSCC_MINIFORGE_MODULE:-miniforge3/24.3.0}"
 source "$(conda info --base)/etc/profile.d/conda.sh"
 conda activate "${ENV_PREFIX}"
 
@@ -43,24 +57,57 @@ export PYTHONPATH="${CODE_ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
 export SPIB_OUTPUT_DIR="${OUTPUT_ROOT}/SPIB"
 export SPIB_FIG_DIR="${OUTPUT_ROOT}/fig"
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-8}"
+export NSCC_PROJECT_ROOT="${PROJECT_ROOT}"
 
 echo "===== SPIB NSCC run ====="
 date
 echo "host=$(hostname)"
 echo "job=${PBS_JOBID:-manual}"
+echo "target=${NSCC_TARGET:-unknown}"
 echo "code_root=${CODE_ROOT}"
 echo "config=${CONFIG_PATH}"
 echo "env=${ENV_PREFIX}"
 echo "output=${OUTPUT_ROOT}"
-git rev-parse HEAD
-git status --short --untracked-files=no || true
+echo "source_mode=${SOURCE_MODE}"
+
+if [[ -z "${CODE_VERSION}" && -f VERSION ]]; then
+    CODE_VERSION="$(tr -d '[:space:]' <VERSION)"
+fi
+echo "code_version=${CODE_VERSION:-unversioned}"
+
+if [[ -z "${SOURCE_COMMIT}" ]] && git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    SOURCE_COMMIT="$(git rev-parse HEAD^{commit})"
+fi
+echo "git_commit=${SOURCE_COMMIT:-unknown}"
+
+if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    git status --short --untracked-files=all || true
+fi
+
+cp -- "${CONFIG_PATH}" "${OUTPUT_ROOT}/submitted-config.ini"
+cp -- "${PBS_SCRIPT_SOURCE}" "${OUTPUT_ROOT}/submitted-job.pbs"
+for provenance_file in \
+    VERSION \
+    CHANGELOG.md \
+    .nscc-source-info \
+    .nscc-run-source-info \
+    .nscc-source-status \
+    .nscc-source.patch \
+    .nscc-source-manifest.sha256
+do
+    if [[ -f "${CODE_ROOT}/${provenance_file}" ]]; then
+        cp -- "${CODE_ROOT}/${provenance_file}" "${OUTPUT_ROOT}/${provenance_file}"
+    fi
+done
+
 python - <<'PY'
 import torch
 print("torch=", torch.__version__)
 print("torch_cuda_build=", torch.version.cuda)
 print("cuda_available=", torch.cuda.is_available())
-if torch.cuda.is_available():
-    print("gpu=", torch.cuda.get_device_name(0))
+if not torch.cuda.is_available():
+    raise SystemExit("CUDA is unavailable inside the allocated GPU job")
+print("gpu=", torch.cuda.get_device_name(0))
 PY
 nvidia-smi
 

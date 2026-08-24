@@ -1,0 +1,4 @@
+interface:
+  display_name: "SPIB → NSCC Runner"
+  short_description: "管理 SPIB 版本、执行 NSCC GPU 并跟踪日志"
+  default_prompt: "Use $spib-nscc-runner to modify or version HSIC-SPIB locally, run an immutable snapshot on NSCC, follow the live log, and diagnose the result."

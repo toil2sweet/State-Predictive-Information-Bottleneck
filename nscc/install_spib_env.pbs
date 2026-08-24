@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+#PBS -N spib-env
+#PBS -j oe
+
+set -euo pipefail
+
+PROJECT_ROOT="${NSCC_PROJECT_ROOT:?NSCC_PROJECT_ROOT is required}"
+ENV_PREFIX="${NSCC_ENV_PREFIX:-${PROJECT_ROOT}/envs/spib}"
+MINIFORGE_MODULE="${NSCC_MINIFORGE_MODULE:-miniforge3}"
+LOG_ROOT="${PROJECT_ROOT}/logs/spib"
+LOG_FILE="${LOG_ROOT}/${PBS_JOBID:-install-spib-env}.log"
+mkdir -p "${LOG_ROOT}" "${PROJECT_ROOT}/envs"
+exec > >(tee "${LOG_FILE}") 2>&1
+
+module load "${MINIFORGE_MODULE}"
+source "$(conda info --base)/etc/profile.d/conda.sh"
+if [[ ! -x "${ENV_PREFIX}/bin/python" ]]; then
+    conda create -p "${ENV_PREFIX}" python=3.10 pip -y
+fi
+conda activate "${ENV_PREFIX}"
+python -m pip install --upgrade pip
+# Rebuild the H100 SPIB software stack instead of copying its binary prefix.
+# The subsequent scheduled probe is the authoritative A100 driver check.
+python -m pip install --index-url https://download.pytorch.org/whl/cu124 \
+    torch==2.6.0 torchvision==0.21.0
+python -m pip install numpy==2.2.6 matplotlib==3.10.9
+python -m pip check
+python - <<'PY'
+import torch
+print("torch=", torch.__version__)
+print("torch_cuda_build=", torch.version.cuda)
+PY
+echo "exit_status=0"

@@ -15,15 +15,16 @@ def pairwise_squared_distances(x):
     return dist.clamp(min=0.0)
 
 
-def median_heuristic_bandwidth(x, min_bandwidth=1e-2):
+def median_heuristic_bandwidth(x, min_bandwidth=1e-2, dist=None):
     """Median pairwise distance heuristic; returned value is detached."""
     with torch.no_grad():
-        dist = pairwise_squared_distances(x)
-        # use upper triangle (exclude diagonal)
+        if dist is None:
+            dist = pairwise_squared_distances(x)
         b = dist.size(0)
         if b < 2:
             return torch.tensor(1.0, device=x.device, dtype=x.dtype)
-        tri = dist[torch.triu(torch.ones(b, b, device=x.device, dtype=torch.bool), diagonal=1)]
+        idx = torch.triu_indices(b, b, offset=1, device=x.device)
+        tri = dist[idx[0], idx[1]]
         med = torch.median(torch.sqrt(tri.clamp(min=0.0)))
         if not torch.isfinite(med) or med <= 0:
             med = torch.mean(torch.sqrt(tri.clamp(min=0.0)))
@@ -39,11 +40,11 @@ def rbf_kernel(x, sigma=None, detach_kernel=False):
     """
     dist = pairwise_squared_distances(x)
     if sigma is None:
-        sigma = median_heuristic_bandwidth(x)
+        sigma = median_heuristic_bandwidth(x, dist=dist)
     else:
         sigma = torch.as_tensor(sigma, device=x.device, dtype=x.dtype).detach()
         if float(sigma) <= 0:
-            sigma = median_heuristic_bandwidth(x)
+            sigma = median_heuristic_bandwidth(x, dist=dist)
 
     # scale by feature dim similar to HSIC-bottleneck variance convention
     dim = max(x.size(1), 1)
@@ -91,10 +92,9 @@ def center_kernel(k):
     # Ensure float dtype: delta/label kernels may arrive as bool/long.
     if not k.is_floating_point():
         k = k.float()
-    n = k.size(0)
-    unit = torch.ones(n, n, device=k.device, dtype=k.dtype) / n
-    h = torch.eye(n, device=k.device, dtype=k.dtype) - unit
-    return torch.mm(torch.mm(h, k), h)
+    row_mean = k.mean(dim=1, keepdim=True)
+    col_mean = k.mean(dim=0, keepdim=True)
+    return k - row_mean - col_mean + k.mean()
 
 
 def hsic_unnormalized(kx, ky):
@@ -106,10 +106,19 @@ def hsic_unnormalized(kx, ky):
 
 def hsic_normalized(kx, ky, eps=1e-6):
     """Normalized HSIC / centered kernel alignment."""
-    pxy = hsic_unnormalized(kx, ky)
-    px = torch.sqrt(hsic_unnormalized(kx, kx).clamp(min=eps))
-    py = torch.sqrt(hsic_unnormalized(ky, ky).clamp(min=eps))
+    kxc = center_kernel(kx)
+    kyc = center_kernel(ky)
+    pxy = torch.mean(kxc * kyc)
+    px = torch.sqrt(torch.mean(kxc * kxc).clamp(min=eps))
+    py = torch.sqrt(torch.mean(kyc * kyc).clamp(min=eps))
     return pxy / (px * py)
+
+
+def hsic_from_grams(kz, ko, normalized=True):
+    """HSIC from precomputed Gram matrices. Gradients flow through kz."""
+    if normalized:
+        return hsic_normalized(kz, ko)
+    return hsic_unnormalized(kz, ko)
 
 
 def build_kernel(x, kernel_type="rbf", sigma=None, detach_kernel=False):
