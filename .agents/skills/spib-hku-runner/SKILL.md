@@ -28,9 +28,9 @@ or reuse the `nscc/` PBS helpers for this target.
 - Enter a GPU node with `gpu-interactive` (Slurm `srun --gpus=1 --pty bash`).
   Never train on `gpu3gate1`.
 - Default config is `examples/Four_Well_hsic_hku_config.ini`.
-- After every HKU execution, download any produced figures into the local
-  repository `fig/` directory with `hku/fetch_figures.sh`. Do not leave
-  figures only on the server.
+- After every HKU execution, download any produced figures with
+  `hku/fetch_figures.sh` into `fig/<system>-<job>-<version>-<MMDDTHHMM>/`.
+  Do not leave figures only on the server.
 - Edit source only on the local Mac.
 
 ## Interpret the request
@@ -58,7 +58,8 @@ or reuse the `nscc/` PBS helpers for this target.
    `traj_gen` files, double-well `double-well_CTC/*.npy` trajectories/labels, starts
    or reuses `gpu-interactive` inside login-node tmux session `spib-hku`,
    sources `hku/interactive_setup.sh` when the compute prompt is ready, runs
-   the config, and copies any PNG/PDF/SVG files into local `fig/`.
+   the config, and copies any PNG/PDF/SVG files into local
+   `fig/<system>-<job>-<version>-<MMDDTHHMM>/`.
 
 4. Attach only when terminal inspection is needed:
 
@@ -82,6 +83,7 @@ gpu-interactive shell). Detach tmux instead of exiting when debugging continues.
 ## Final response
 
 Lead with the outcome. Include mode, config, Slurm job if present, log,
-result paths, and whether figures were downloaded into local `fig/`. End
+result paths, and whether figures were downloaded into
+`fig/<system>-<job>-<version>-<MMDDTHHMM>/`. End
 with a fresh `bash hku/status_summary.sh` line and the existing NSCC
 status lines.

@@ -13,6 +13,7 @@ import torch
 import numpy as np
 import time
 import os
+import json
 import warnings
 
 import hsic_utils
@@ -284,6 +285,258 @@ def save_and_report_transition_states(prediction_path, population_path=None,
             print(line, file=open(log_path, 'a'))
 
     return result
+
+
+def select_ctc_style_ts_representatives(
+        traj_data, ts_result, output_prefix=None, top_k=10,
+        event_max_gap=1, min_event_frames=1,
+        density_method="histogram2d", density_bins=100,
+        selection_scope="global", state_pairs=None, log_path=None):
+    """Select CTC-style representatives from SPIB transition-state candidates.
+
+    This is a comparison-only post-processing step; it does not run CTC or
+    change the SPIB/HSIC-SPIB model. Candidate frames are first grouped into
+    temporal events with the same unordered top-2 state pair. One frame with
+    the smallest decoder margin is retained from each event (density and frame
+    index break ties). Event representatives are then ranked by empirical 2-D
+    trajectory density, either globally or separately for each state pair.
+
+    ``event_max_gap`` is the maximum number of non-candidate frames allowed
+    between neighboring candidate frames in one event. ``state_pairs`` is
+    either None (all pairs) or an iterable such as ``[[0, 1], [1, 2]]``.
+    """
+    traj = np.asarray(traj_data)
+    if traj.ndim != 2 or traj.shape[1] < 2:
+        raise ValueError(
+            "CTC-style histogram2d ranking requires traj_data with shape (N, D>=2), "
+            "got %s" % (traj.shape,))
+
+    required = ("ts_mask", "margin", "top1", "top2")
+    missing = [key for key in required if key not in ts_result]
+    if missing:
+        raise ValueError("ts_result is missing keys: %s" % missing)
+
+    ts_mask = np.asarray(ts_result["ts_mask"], dtype=bool)
+    margin = np.asarray(ts_result["margin"], dtype=float)
+    top1 = np.asarray(ts_result["top1"], dtype=int)
+    top2 = np.asarray(ts_result["top2"], dtype=int)
+    n_frames = traj.shape[0]
+    for name, values in (("ts_mask", ts_mask), ("margin", margin),
+                         ("top1", top1), ("top2", top2)):
+        if values.shape != (n_frames,):
+            raise ValueError(
+                "%s must have shape (%d,), got %s" %
+                (name, n_frames, values.shape))
+
+    top_k = int(top_k)
+    event_max_gap = int(event_max_gap)
+    min_event_frames = int(min_event_frames)
+    density_bins = int(density_bins)
+    if top_k < 1:
+        raise ValueError("top_k must be >= 1")
+    if event_max_gap < 0:
+        raise ValueError("event_max_gap must be >= 0")
+    if min_event_frames < 1:
+        raise ValueError("min_event_frames must be >= 1")
+    if density_bins < 2:
+        raise ValueError("density_bins must be >= 2")
+    if density_method != "histogram2d":
+        raise ValueError("density_method must be 'histogram2d'")
+    if selection_scope not in ("global", "per_pair"):
+        raise ValueError("selection_scope must be 'global' or 'per_pair'")
+
+    allowed_pairs = None
+    if state_pairs is not None:
+        allowed_pairs = set()
+        for pair in state_pairs:
+            if len(pair) != 2:
+                raise ValueError("each state pair must contain exactly two indices")
+            normalized = tuple(sorted((int(pair[0]), int(pair[1]))))
+            if normalized[0] == normalized[1]:
+                raise ValueError("state pair indices must be different: %s" % (pair,))
+            allowed_pairs.add(normalized)
+
+    finite_xy = np.isfinite(traj[:, 0]) & np.isfinite(traj[:, 1])
+    if not np.any(finite_xy):
+        raise ValueError("traj_data has no finite (x, y) frames")
+    counts, xedges, yedges = np.histogram2d(
+        traj[finite_xy, 0], traj[finite_xy, 1], bins=density_bins)
+    xbin = np.searchsorted(xedges, traj[:, 0], side="right") - 1
+    ybin = np.searchsorted(yedges, traj[:, 1], side="right") - 1
+    xbin = np.clip(xbin, 0, counts.shape[0] - 1)
+    ybin = np.clip(ybin, 0, counts.shape[1] - 1)
+    frame_density = np.zeros(n_frames, dtype=float)
+    frame_density[finite_xy] = (
+        counts[xbin[finite_xy], ybin[finite_xy]] / float(np.sum(counts)))
+
+    candidate_indices = np.flatnonzero(ts_mask)
+    candidate_pairs = {
+        int(idx): tuple(sorted((int(top1[idx]), int(top2[idx]))))
+        for idx in candidate_indices
+    }
+    if allowed_pairs is not None:
+        candidate_indices = np.asarray(
+            [idx for idx in candidate_indices
+             if candidate_pairs[int(idx)] in allowed_pairs], dtype=int)
+
+    events = []
+    current = []
+    current_pair = None
+    previous_idx = None
+    for idx_value in candidate_indices:
+        idx = int(idx_value)
+        pair = candidate_pairs[idx]
+        same_event = (
+            current
+            and pair == current_pair
+            and idx - previous_idx <= event_max_gap + 1)
+        if not same_event and current:
+            events.append((current_pair, np.asarray(current, dtype=int)))
+            current = []
+        current.append(idx)
+        current_pair = pair
+        previous_idx = idx
+    if current:
+        events.append((current_pair, np.asarray(current, dtype=int)))
+
+    representatives = []
+    representative_pairs = []
+    event_lengths = []
+    for pair, event_indices in events:
+        if event_indices.size < min_event_frames:
+            continue
+        # Primary: minimum decoder margin. Secondary: maximum empirical
+        # density. Tertiary: earliest frame for deterministic output.
+        order = np.lexsort((
+            event_indices,
+            -frame_density[event_indices],
+            margin[event_indices],
+        ))
+        representatives.append(int(event_indices[order[0]]))
+        representative_pairs.append(pair)
+        event_lengths.append(int(event_indices.size))
+
+    representative_indices = np.asarray(representatives, dtype=int)
+    if representative_pairs:
+        representative_pairs_array = np.asarray(representative_pairs, dtype=int)
+    else:
+        representative_pairs_array = np.empty((0, 2), dtype=int)
+    representative_density = frame_density[representative_indices]
+    representative_margin = margin[representative_indices]
+
+    selected_positions = []
+    if selection_scope == "global":
+        order = np.lexsort((
+            representative_indices,
+            representative_margin,
+            -representative_density,
+        ))
+        selected_positions = order[:top_k].tolist()
+    else:
+        for pair in sorted(set(representative_pairs)):
+            positions = np.asarray(
+                [i for i, value in enumerate(representative_pairs) if value == pair],
+                dtype=int)
+            order = np.lexsort((
+                representative_indices[positions],
+                representative_margin[positions],
+                -representative_density[positions],
+            ))
+            selected_positions.extend(positions[order[:top_k]].tolist())
+        selected_positions.sort(key=lambda pos: int(representative_indices[pos]))
+
+    selected_positions = np.asarray(selected_positions, dtype=int)
+    selected_indices = representative_indices[selected_positions]
+    selected_pairs = representative_pairs_array[selected_positions]
+    event_mask = np.zeros(n_frames, dtype=bool)
+    selected_mask = np.zeros(n_frames, dtype=bool)
+    event_mask[representative_indices] = True
+    selected_mask[selected_indices] = True
+
+    pair_counts = {}
+    for pair in representative_pairs:
+        key = "%d-%d" % pair
+        pair_counts.setdefault(key, {"event_representatives": 0, "selected": 0})
+        pair_counts[key]["event_representatives"] += 1
+    for pair in selected_pairs:
+        key = "%d-%d" % (int(pair[0]), int(pair[1]))
+        pair_counts[key]["selected"] += 1
+
+    paths = {}
+    if output_prefix is not None:
+        selected_stem = "top%d" % top_k
+        if selection_scope == "per_pair":
+            selected_stem += "_per_pair"
+        paths = {
+            "event_mask": output_prefix + "_ctc_event_mask.npy",
+            "event_indices": output_prefix + "_ctc_event_indices.npy",
+            "event_pairs": output_prefix + "_ctc_event_pairs.npy",
+            "event_density": output_prefix + "_ctc_event_density.npy",
+            "event_lengths": output_prefix + "_ctc_event_lengths.npy",
+            "selected_mask": output_prefix + "_ctc_%s_mask.npy" % selected_stem,
+            "selected_indices": output_prefix + "_ctc_%s_indices.npy" % selected_stem,
+            "selected_pairs": output_prefix + "_ctc_%s_pairs.npy" % selected_stem,
+            "metadata": output_prefix + "_ctc_metadata.json",
+        }
+        np.save(paths["event_mask"], event_mask)
+        np.save(paths["event_indices"], representative_indices)
+        np.save(paths["event_pairs"], representative_pairs_array)
+        np.save(paths["event_density"], representative_density)
+        np.save(paths["event_lengths"], np.asarray(event_lengths, dtype=int))
+        np.save(paths["selected_mask"], selected_mask)
+        np.save(paths["selected_indices"], selected_indices)
+        np.save(paths["selected_pairs"], selected_pairs)
+
+    metadata = {
+        "method": "ctc_style_postprocessing",
+        "note": "Comparison-only selection from SPIB decoder candidates; CTC was not run.",
+        "top_k": top_k,
+        "selection_scope": selection_scope,
+        "state_pairs": "all" if allowed_pairs is None else [list(pair) for pair in sorted(allowed_pairs)],
+        "event_max_gap": event_max_gap,
+        "min_event_frames": min_event_frames,
+        "density_method": density_method,
+        "density_bins": density_bins,
+        "n_raw_candidates": int(np.sum(ts_mask)),
+        "n_filtered_candidates": int(candidate_indices.size),
+        "n_candidate_events": len(events),
+        "n_event_representatives": int(representative_indices.size),
+        "n_selected_representatives": int(selected_indices.size),
+        "pair_counts": pair_counts,
+    }
+    if output_prefix is not None:
+        with open(paths["metadata"], "w") as handle:
+            json.dump(metadata, handle, indent=2, sort_keys=True)
+
+    msg_lines = [
+        "CTC-style TS post-processing (comparison only; CTC was not run): "
+        "scope=%s top_k=%d density=%s bins=%d" % (
+            selection_scope, top_k, density_method, density_bins),
+        "CTC-style TS counts: raw=%d filtered=%d events=%d "
+        "event_representatives=%d selected=%d" % (
+            metadata["n_raw_candidates"], metadata["n_filtered_candidates"],
+            metadata["n_candidate_events"], metadata["n_event_representatives"],
+            metadata["n_selected_representatives"]),
+    ]
+    for line in msg_lines:
+        print(line)
+    if log_path is not None:
+        with open(log_path, "a") as handle:
+            for line in msg_lines:
+                print(line, file=handle)
+
+    return {
+        "event_mask": event_mask,
+        "event_indices": representative_indices,
+        "event_pairs": representative_pairs_array,
+        "event_density": representative_density,
+        "event_lengths": np.asarray(event_lengths, dtype=int),
+        "selected_mask": selected_mask,
+        "selected_indices": selected_indices,
+        "selected_pairs": selected_pairs,
+        "metadata": metadata,
+        "paths": paths,
+    }
 
 
 # Loss function

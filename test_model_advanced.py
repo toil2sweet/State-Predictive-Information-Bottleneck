@@ -135,6 +135,35 @@ def test_model_advanced():
                 hsic_config["eps_rho"] = float(config.get("HSIC-SPIB", "eps_rho"))
             if config.has_option("HSIC-SPIB", "encoder_var_mode"):
                 hsic_config["encoder_var_mode"] = config.get("HSIC-SPIB", "encoder_var_mode")
+
+        # Optional comparison-only CTC-style selection applied after the
+        # ordinary SPIB/HSIC-SPIB decoder-margin TS detection.
+        ctc_ts_config = {
+            "enabled": False,
+            "event_max_gap": 1,
+            "min_event_frames": 1,
+            "top_k": 10,
+            "density_method": "histogram2d",
+            "density_bins": 100,
+            "selection_scope": "global",
+            "state_pairs": None,
+            "save_plots": True,
+        }
+        if config.has_section("CTC-Style TS"):
+            section = "CTC-Style TS"
+            for option in ("enabled", "save_plots"):
+                if config.has_option(section, option):
+                    ctc_ts_config[option] = config.getboolean(section, option)
+            for option in ("event_max_gap", "min_event_frames", "top_k", "density_bins"):
+                if config.has_option(section, option):
+                    ctc_ts_config[option] = config.getint(section, option)
+            for option in ("density_method", "selection_scope"):
+                if config.has_option(section, option):
+                    ctc_ts_config[option] = config.get(section, option).strip().lower()
+            if config.has_option(section, "state_pairs"):
+                raw_state_pairs = config.get(section, "state_pairs").strip()
+                if raw_state_pairs.lower() != "all":
+                    ctc_ts_config["state_pairs"] = json.loads(raw_state_pairs)
         
         # Import data
 
@@ -214,6 +243,16 @@ def test_model_advanced():
         # The environment override is useful for batch jobs and takes
         # precedence over a machine-specific path in a config file.
         fig_dir = os.environ.get("SPIB_FIG_DIR", fig_dir)
+
+        if ctc_ts_config["enabled"]:
+            if not hsic_config.get("DetectTransitionStates", False):
+                raise ValueError(
+                    "[CTC-Style TS] enabled=True requires "
+                    "[HSIC-SPIB] DetectTransitionStates=True")
+            if not SaveTrajResults:
+                raise ValueError(
+                    "[CTC-Style TS] enabled=True requires "
+                    "[Other Controls] SaveTrajResults=True")
 
     else:
         print("Pleast input the config file!")
@@ -301,19 +340,36 @@ def test_model_advanced():
                                     IB.save_traj_results(traj_data_list[i], batch_size, output_path, SaveTrajResults, i, seed)
 
                                     # After state number: decoder-K_i transition-state identification
+                                    ts_result = None
+                                    ctc_ts_result = None
                                     if SaveTrajResults and run_hsic_config.get("DetectTransitionStates", False):
                                         pred_path = output_path + "_traj%d_data_prediction%d.npy" % (i, seed)
                                         pop_path = output_path + "_traj%d_state_population%d.npy" % (i, seed)
                                         if os.path.isfile(pred_path):
-                                            SPIB_training.save_and_report_transition_states(
+                                            ts_prefix = output_path + "_traj%d_ts%d" % (i, seed)
+                                            ts_result = SPIB_training.save_and_report_transition_states(
                                                 pred_path,
                                                 population_path=pop_path if os.path.isfile(pop_path) else None,
-                                                output_prefix=output_path + "_traj%d_ts%d" % (i, seed),
+                                                output_prefix=ts_prefix,
                                                 eps_ts=float(run_hsic_config.get("eps_ts", 0.1)),
                                                 require_cross_state=bool(
                                                     run_hsic_config.get("ts_require_cross_state", True)),
                                                 window=int(run_hsic_config.get("ts_window", 1)),
                                                 log_path=final_result_path)
+                                            if ctc_ts_config["enabled"]:
+                                                traj_for_ts = traj_data_list[i].detach().cpu().numpy()
+                                                ctc_ts_result = SPIB_training.select_ctc_style_ts_representatives(
+                                                    traj_for_ts,
+                                                    ts_result,
+                                                    output_prefix=ts_prefix,
+                                                    top_k=ctc_ts_config["top_k"],
+                                                    event_max_gap=ctc_ts_config["event_max_gap"],
+                                                    min_event_frames=ctc_ts_config["min_event_frames"],
+                                                    density_method=ctc_ts_config["density_method"],
+                                                    density_bins=ctc_ts_config["density_bins"],
+                                                    selection_scope=ctc_ts_config["selection_scope"],
+                                                    state_pairs=ctc_ts_config["state_pairs"],
+                                                    log_path=final_result_path)
 
                                     # Plot learned state labels (same style as SPIB_Demo.ipynb)
                                     if SaveTrajResults and SaveLabelPlot:
@@ -407,6 +463,32 @@ def test_model_advanced():
                                                         kind, path, n_ts)
                                                     print(msg)
                                                     print(msg, file=open(final_result_path, 'a'))
+
+                                                if (ctc_ts_result is not None
+                                                        and ctc_ts_config["save_plots"]):
+                                                    ctc_top_k = int(ctc_ts_config["top_k"])
+                                                    per_pair = (
+                                                        ctc_ts_config["selection_scope"] == "per_pair")
+                                                    selection_name = "top%d_per_pair" % ctc_top_k if per_pair else (
+                                                        "top%d" % ctc_top_k)
+                                                    title_selection = "top-%d per pair" % ctc_top_k if per_pair else (
+                                                        "top-%d" % ctc_top_k)
+                                                    ctc_name_prefix = "%s_CTCstyle_%s" % (
+                                                        name_prefix, selection_name)
+                                                    ctc_figs = plot_transition_states.plot_all_ts_figures(
+                                                        traj_np, labels_np,
+                                                        ctc_ts_result["selected_mask"],
+                                                        fig_dir, ctc_name_prefix,
+                                                        fe_beta=float(run_hsic_config.get("fe_beta", 3.0)),
+                                                        potential=pot,
+                                                        fe_vmax=run_hsic_config.get("fe_vmax", None),
+                                                        dpi=150,
+                                                        title_prefix="CTC-style %s representatives" % title_selection)
+                                                    for kind, path, n_ts in ctc_figs:
+                                                        msg = "Saved CTC-style %s plot: %s (n_TS=%d)" % (
+                                                            kind, path, n_ts)
+                                                        print(msg)
+                                                        print(msg, file=open(final_result_path, 'a'))
                                 
                                 IB.save_representative_parameters(output_path, seed)
 

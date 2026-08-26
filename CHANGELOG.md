@@ -6,6 +6,15 @@ milestones.
 
 ## Unreleased
 
+## 0.4.0 - 2026-08-26
+
+- Add CTC-style three-level transition-state representatives, comparison plots, and HKU figure directories.
+
+- Omit the CTC-style title prefix from four-well free-energy+TS comparison plots.
+- Store fetched HKU figures in fig/<system>-<job>-<version>-<MMDDTHHMM>.
+- Add config-driven CTC-style transition-event representatives and density-ranked top-k comparison plots.
+- Milestone tag: `3_level_TS`.
+
 ## 0.3.0 - 2026-08-24
 
 - Add reproducible Double-Well and Four-Well trajectory generation with improved SPIB/CTC-style plots and GPU workflows.

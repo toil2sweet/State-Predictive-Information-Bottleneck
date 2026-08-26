@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 # From the local Mac: sync, reuse/start gpu-interactive, run one config, then
-# download any produced figures into this checkout's fig/ directory.
+# download any produced figures into fig/<system>-<job>-<version>-<MMDDTHHMM>/.
 
 set -euo pipefail
 
@@ -10,7 +10,8 @@ usage() {
 Usage: hku/run.sh [CONFIG]
 
 Synchronize the local tree, start or reuse the HKU interactive GPU session,
-run CONFIG with spib_run, and copy any PNG/PDF/SVG figures into fig/.
+run CONFIG with spib_run, and copy any PNG/PDF/SVG figures into
+fig/<system>-<job>-<version>-<MMDDTHHMM>/.
 CONFIG defaults to examples/Four_Well_hsic_hku_config.ini.
 EOF
 }

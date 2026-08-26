@@ -71,8 +71,8 @@
   `hku/interactive_session.sh` or `hku/run.sh`, activate Conda `base`, and keep
   trajectories, logs, and results under the HKU runtime checkout. After each
   HKU run, if figures exist, download them with `hku/fetch_figures.sh` into
-  this repository's `fig/` directory. Unspecified execution still defaults
-  to NSCC A100.
+  this repository's `fig/<system>-<job>-<version>-<MMDDTHHMM>/` directory.
+  Unspecified execution still defaults to NSCC A100.
 - When the user explicitly says `交互模式`, use the reconnectable NSCC
   interactive workflow with a default walltime of 6 hours. Reuse the selected
   target's healthy `spib-a100` or `spib-gpu` allocation, sync local changes before each new execution,

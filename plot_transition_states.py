@@ -371,13 +371,13 @@ def plot_potential_with_ts(traj_data, ts_mask, save_path,
     if potential in ("four_well", "fw"):
         return _plot_four_well_potential_with_ts(
             traj_data, ts_mask, save_path, x_ts, y_ts, n_ts,
-            grid_n=grid_n, title=None, dpi=dpi,
+            grid_n=grid_n, title=title, dpi=dpi,
             clim=clim, x_range=x_range, y_range=y_range)
 
     if potential in ("double_well", "dw"):
         return _plot_double_well_potential_with_ts(
             traj_data, ts_mask, save_path, x_ts, y_ts, n_ts,
-            grid_n=grid_n, title=None, dpi=dpi,
+            grid_n=grid_n, title=title, dpi=dpi,
             clim=clim, x_range=x_range, y_range=y_range)
 
     if potential in ("muller", "muller_brown", "mb"):
@@ -442,7 +442,7 @@ def plot_potential_with_ts(traj_data, ts_mask, save_path,
 
 def plot_all_ts_figures(traj_data, traj_labels, ts_mask, fig_dir, name_prefix,
                         fe_beta=3.0, potential="four_well", dpi=150,
-                        fe_vmax=None):
+                        fe_vmax=None, title_prefix=None):
     """
     Write TS-annotated figures under fig_dir:
       labels+TS, free-energy+TS, and (if potential is set) analytical V+TS.
@@ -466,9 +466,13 @@ def plot_all_ts_figures(traj_data, traj_labels, ts_mask, fig_dir, name_prefix,
     ctc_potential = four_well or double_well
 
     p1 = os.path.join(fig_dir, name_prefix + "_labels_with_TS.png")
+    labels_title = None
+    if title_prefix:
+        labels_title = "%s: learned labels + TS (n_TS=%d)" % (
+            title_prefix, int(np.sum(ts_mask)))
     path, n_ts = plot_labels_with_ts(
         traj_data, traj_labels, ts_mask, p1, dpi=dpi,
-        title="Learned labels + TS (n_TS=%d)" % int(np.sum(ts_mask)))
+        title=labels_title or "Learned labels + TS (n_TS=%d)" % int(np.sum(ts_mask)))
     results.append(("labels_with_TS", path, n_ts))
 
     if fe_vmax is None:
@@ -480,19 +484,31 @@ def plot_all_ts_figures(traj_data, traj_labels, ts_mask, fig_dir, name_prefix,
             fe_vmax = 3.0
 
     p2 = os.path.join(fig_dir, name_prefix + "_free_energy_with_TS.png")
+    free_energy_title = None
+    # Four-well SPIB Fig. 5(b) already labels the colorbar "Free Energy";
+    # keep that panel free of the CTC-style title_prefix.
+    if title_prefix and not four_well:
+        free_energy_title = "%s: free energy + TS (n_TS=%d)" % (
+            title_prefix, int(np.sum(ts_mask)))
+    elif not four_well:
+        free_energy_title = "Free energy + TS (n_TS=%d)" % int(np.sum(ts_mask))
     path, n_ts = plot_free_energy_with_ts(
         traj_data, ts_mask, p2, fe_beta=fe_beta, dpi=dpi, vmax=fe_vmax,
         recipe="spib_demo" if four_well else "clipped",
-        title=None if four_well else (
-            "Free energy + TS (n_TS=%d)" % int(np.sum(ts_mask))))
+        title=free_energy_title)
     results.append(("free_energy_with_TS", path, n_ts))
 
     if potential is not None and str(potential).strip() != "":
         p3 = os.path.join(fig_dir, name_prefix + "_potential_with_TS.png")
+        potential_title = None
+        if title_prefix:
+            potential_title = "%s: analytical potential + TS (n_TS=%d)" % (
+                title_prefix, int(np.sum(ts_mask)))
+        elif not ctc_potential:
+            potential_title = "Potential + TS (n_TS=%d)" % int(np.sum(ts_mask))
         path, n_ts = plot_potential_with_ts(
             traj_data, ts_mask, p3, potential=potential, dpi=dpi,
-            title=None if ctc_potential else (
-                "Potential + TS (n_TS=%d)" % int(np.sum(ts_mask))))
+            title=potential_title)
         results.append(("potential_with_TS", path, n_ts))
 
     return results
