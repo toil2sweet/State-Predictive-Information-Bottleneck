@@ -1,18 +1,16 @@
 """
 Prepare HSIC-SPIB / HSIC-SPIB+ inputs from the TS-DAR Müller-potential trajectory.
 
-Initial-label methods (HSIC-SPIB+):
+Canonical Müller labels for training: xy_kmeans, K=20 (slanted three-basin geometry).
+Other methods remain available for ablation:
   x_bins      — equal-width bins along x (legacy; poor for diagonal basins)
-  xy_kmeans   — MiniBatchKMeans on (x, y)  [default; for slanted Müller wells]
-  tica_kmeans — TICA then MiniBatchKMeans (protein-style protocol)
+  tica_kmeans — TICA then MiniBatchKMeans (protein-style; little gain in 2D)
 
 Source: ts-dar/data/muller/muller.npy  (Brownian dynamics, T ≈ 0.9)
 
 Examples:
   python muller/prepare_spib_data.py
-  python muller/prepare_spib_data.py --method xy_kmeans --n-clusters 30
-  python muller/prepare_spib_data.py --method x_bins --state-num 10
-  python muller/prepare_spib_data.py --method tica_kmeans --n-clusters 30 --tica-lag 10
+  python muller/prepare_spib_data.py --method xy_kmeans --n-clusters 20
 """
 from __future__ import print_function
 
@@ -29,7 +27,7 @@ DEFAULT_SOURCE = REPO_ROOT / "ts-dar" / "data" / "muller" / "muller.npy"
 
 STATE_NUM = 6
 EPS = 1e-3
-DEFAULT_N_CLUSTERS = 30
+DEFAULT_N_CLUSTERS = 20
 DEFAULT_TICA_LAG = 10
 DEFAULT_TICA_DIM = 2
 
@@ -282,7 +280,7 @@ if __name__ == "__main__":
         "--n-clusters",
         type=int,
         default=DEFAULT_N_CLUSTERS,
-        help="K for xy_kmeans / tica_kmeans (default: 30)",
+        help="K for xy_kmeans / tica_kmeans (default: 20)",
     )
     parser.add_argument("--tica-lag", type=int, default=DEFAULT_TICA_LAG)
     parser.add_argument("--tica-dim", type=int, default=DEFAULT_TICA_DIM)

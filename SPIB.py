@@ -420,3 +420,340 @@ class SPIB(nn.Module):
             if len(self.convergence_history) > 0:
                 hist_path = path + '_convergence_history' + str(index) + '.npy'
                 np.save(hist_path, np.asarray(self.convergence_history, dtype=np.float64))
+
+
+def dt_key(dt):
+    return str(int(dt))
+
+
+def dt_tag(dt_list):
+    return "-".join(str(int(dt)) for dt in dt_list)
+
+
+class SPIBMTL(nn.Module):
+    """Shared encoder with one SPIB decoder head per time delay Δt."""
+
+    def __init__(self, encoder_type, z_dim, output_dim, data_shape, device, dt_list,
+                 UpdateLabel=False, neuron_num1=128, neuron_num2=128,
+                 data_transform=None, encoder_var_mode='input_dependent'):
+        super(SPIBMTL, self).__init__()
+        dt_list = [int(dt) for dt in dt_list]
+        if len(dt_list) < 2:
+            raise ValueError("SPIBMTL requires at least two time delays")
+        if len(set(dt_list)) != len(dt_list):
+            raise ValueError("dt_list must contain unique time delays: %s" % (dt_list,))
+
+        if encoder_type == 'Nonlinear':
+            self.encoder_type = 'Nonlinear'
+        else:
+            self.encoder_type = 'Linear'
+
+        self.z_dim = z_dim
+        self.dt_list = dt_list
+        self.neuron_num1 = neuron_num1
+        self.neuron_num2 = neuron_num2
+        self.data_shape = data_shape
+        self.data_transform = data_transform
+        self.UpdateLabel = UpdateLabel
+        self.eps = 1e-10
+        self.device = device
+        if encoder_var_mode not in ('input_dependent', 'isotropic'):
+            raise ValueError("encoder_var_mode must be 'input_dependent' or 'isotropic'")
+        self.encoder_var_mode = encoder_var_mode
+
+        self.output_dim = {dt: int(output_dim) for dt in dt_list}
+        self.representative_dim = {dt: int(output_dim) for dt in dt_list}
+        self.convergence_history = {dt: [] for dt in dt_list}
+
+        self.encoder = self._encoder_init()
+        if self.encoder_type == 'Nonlinear':
+            self.encoder_mean = nn.Linear(self.neuron_num1, self.z_dim)
+        else:
+            self.encoder_mean = nn.Linear(np.prod(self.data_shape), self.z_dim)
+        if self.encoder_var_mode == 'isotropic':
+            self.encoder_logvar = nn.Parameter(torch.tensor([0.0]))
+        else:
+            self.encoder_logvar = nn.Sequential(
+                nn.Linear(self.neuron_num1, self.z_dim),
+                nn.Sigmoid())
+
+        self.decoder = nn.ModuleDict()
+        self.decoder_output = nn.ModuleDict()
+        self.representative_weights = nn.ModuleDict()
+        self.representative_inputs = {}
+        self.idle_input = {}
+        for dt in dt_list:
+            key = dt_key(dt)
+            self.decoder[key] = self._decoder_body_init()
+            self.decoder_output[key] = nn.Sequential(
+                nn.Linear(self.neuron_num2, self.output_dim[dt]),
+                nn.LogSoftmax(dim=1))
+            self.reset_representative(
+                dt,
+                torch.eye(self.output_dim[dt], np.prod(self.data_shape),
+                          device=device, requires_grad=False))
+
+    def _inference_batch_size(self, n_items, batch_size):
+        n_items = int(n_items)
+        batch_size = max(int(batch_size), 1)
+        if n_items <= 0:
+            return batch_size
+        return max(batch_size, min(16384, n_items))
+
+    def _encoder_init(self):
+        modules = []
+        if self.data_transform is not None:
+            modules += [self.data_transform]
+        modules += [nn.Linear(np.prod(self.data_shape), self.neuron_num1)]
+        modules += [nn.ReLU()]
+        for _ in range(1):
+            modules += [nn.Linear(self.neuron_num1, self.neuron_num1)]
+            modules += [nn.ReLU()]
+        return nn.Sequential(*modules)
+
+    def _decoder_body_init(self):
+        modules = [nn.Linear(self.z_dim, self.neuron_num2)]
+        modules += [nn.ReLU()]
+        for _ in range(1):
+            modules += [nn.Linear(self.neuron_num2, self.neuron_num2)]
+            modules += [nn.ReLU()]
+        return nn.Sequential(*modules)
+
+    def reparameterize(self, mu, logvar):
+        std = torch.exp(0.5 * logvar)
+        eps = torch.randn_like(mu)
+        return eps * std + mu
+
+    def encode(self, inputs):
+        enc = self.encoder(inputs)
+        if self.encoder_type == 'Nonlinear':
+            z_mean = self.encoder_mean(enc)
+        else:
+            if self.data_transform is not None:
+                z_mean = self.encoder_mean(self.data_transform(inputs))
+            else:
+                z_mean = self.encoder_mean(inputs)
+        if self.encoder_var_mode == 'isotropic':
+            z_logvar = self.encoder_logvar.expand(z_mean.size(0), self.z_dim)
+        else:
+            z_logvar = -10 * self.encoder_logvar(enc)
+        return z_mean, z_logvar
+
+    def decode(self, z, dt):
+        key = dt_key(dt)
+        return self.decoder_output[key](self.decoder[key](z))
+
+    def forward(self, data, dt, decoder_on_mean=False):
+        inputs = torch.flatten(data, start_dim=1)
+        z_mean, z_logvar = self.encode(inputs)
+        z_sample = self.reparameterize(z_mean, z_logvar)
+        if decoder_on_mean:
+            outputs = self.decode(z_mean, dt)
+        else:
+            outputs = self.decode(z_sample, dt)
+        return outputs, z_sample, z_mean, z_logvar
+
+    def log_p(self, z, dt, sum_up=True):
+        representative_z_mean, representative_z_logvar = self.get_representative_z(dt)
+        w = self.representative_weights[dt_key(dt)](self.idle_input[int(dt)])
+        z_expand = z.unsqueeze(1)
+        representative_mean = representative_z_mean.unsqueeze(0)
+        representative_logvar = representative_z_logvar.unsqueeze(0)
+        representative_log_q = -0.5 * torch.sum(
+            representative_logvar + torch.pow(z_expand - representative_mean, 2)
+            / torch.exp(representative_logvar), dim=2)
+        if sum_up:
+            return torch.sum(torch.log(torch.exp(representative_log_q) @ w + self.eps), dim=1)
+        return torch.log(torch.exp(representative_log_q) * w.T + self.eps)
+
+    def get_representative_z(self, dt):
+        return self.encode(self.representative_inputs[int(dt)])
+
+    def reset_representative(self, dt, representative_inputs):
+        dt = int(dt)
+        key = dt_key(dt)
+        self.representative_dim[dt] = representative_inputs.shape[0]
+        idle = torch.eye(
+            self.representative_dim[dt], self.representative_dim[dt],
+            device=self.device, requires_grad=False)
+        self.idle_input[dt] = idle
+        weights = nn.Sequential(
+            nn.Linear(self.representative_dim[dt], 1, bias=False),
+            nn.Softmax(dim=0))
+        weights[0].weight = nn.Parameter(
+            torch.ones([1, self.representative_dim[dt]], device=self.device))
+        self.representative_weights[key] = weights.to(self.device)
+        self.representative_inputs[dt] = representative_inputs.clone().detach()
+
+    @torch.no_grad()
+    def init_representative_inputs(self, inputs, labels_by_dt):
+        for dt in self.dt_list:
+            labels = labels_by_dt[dt]
+            state_population = labels.sum(dim=0).cpu()
+            representative_inputs = []
+            for i in range(state_population.shape[-1]):
+                if state_population[i] > 0:
+                    index = np.random.randint(0, int(state_population[i].item()))
+                    representative_inputs += [inputs[labels[:, i].bool()][index].reshape(1, -1)]
+                else:
+                    index = np.random.randint(0, inputs.shape[0])
+                    representative_inputs += [inputs[index].reshape(1, -1)]
+            representative_inputs = torch.cat(representative_inputs, dim=0)
+            self.reset_representative(dt, representative_inputs.to(self.device))
+        return self.representative_inputs
+
+    @torch.no_grad()
+    def estimatate_representative_inputs(self, inputs, bias, batch_size, dt, labels=None):
+        dt = int(dt)
+        mean_rep = []
+        eval_batch_size = self._inference_batch_size(len(inputs), batch_size)
+        for i in range(0, len(inputs), eval_batch_size):
+            batch_inputs = inputs[i:i + eval_batch_size].to(self.device)
+            z_mean, _ = self.encode(batch_inputs)
+            mean_rep += [z_mean]
+        mean_rep = torch.cat(mean_rep, dim=0)
+
+        if labels is None:
+            prediction = []
+            for i in range(0, len(inputs), eval_batch_size):
+                batch_inputs = inputs[i:i + eval_batch_size].to(self.device)
+                z_mean, _ = self.encode(batch_inputs)
+                prediction += [self.decode(z_mean, dt).exp()]
+            prediction = torch.cat(prediction, dim=0)
+            max_pos = prediction.argmax(1)
+            labels = F.one_hot(max_pos, num_classes=self.output_dim[dt])
+
+        state_population = labels.sum(dim=0)
+        representative_inputs = []
+        for i in range(state_population.shape[-1]):
+            if state_population[i] > 0:
+                if bias is None:
+                    center_z = ((mean_rep[labels[:, i].bool()]).mean(dim=0)).reshape(1, -1)
+                else:
+                    weights = bias[labels[:, i].bool()].reshape(-1, 1)
+                    center_z = ((weights * mean_rep[labels[:, i].bool()]).sum(dim=0) / weights.sum()).reshape(1, -1)
+                dist = torch.square(mean_rep - center_z).sum(dim=-1)
+                index = torch.argmin(dist)
+                representative_inputs += [inputs[index].reshape(1, -1)]
+        if len(representative_inputs) == 0:
+            raise ValueError("No non-empty states for representative inputs at dt=%d" % dt)
+        return torch.cat(representative_inputs, dim=0)
+
+    @torch.no_grad()
+    def update_model(self, inputs, input_weights, train_data_labels, test_data_labels,
+                     batch_size, dt, eps_rho=0.0, update_representative=True):
+        dt = int(dt)
+        key = dt_key(dt)
+        state_population = train_data_labels.sum(dim=0).float() / train_data_labels.shape[0]
+        keep = state_population > eps_rho
+        if int(keep.sum().item()) < 2:
+            raise ValueError("Fewer than 2 states remain after population pruning at dt=%d" % dt)
+
+        train_data_labels = train_data_labels[:, keep]
+        test_data_labels = test_data_labels[:, keep]
+        w = self.decoder_output[key][0].weight[keep]
+        b = self.decoder_output[key][0].bias[keep]
+        self.output_dim[dt] = int(keep.sum().item())
+        head = nn.Sequential(
+            nn.Linear(self.neuron_num2, self.output_dim[dt]),
+            nn.LogSoftmax(dim=1))
+        head[0].weight = nn.Parameter(w.to(self.device))
+        head[0].bias = nn.Parameter(b.to(self.device))
+        self.decoder_output[key] = head.to(self.device)
+
+        if update_representative or self.representative_inputs[dt].shape[0] != self.output_dim[dt]:
+            representative_inputs = self.estimatate_representative_inputs(
+                inputs, input_weights, batch_size, dt, labels=train_data_labels)
+            self.reset_representative(dt, representative_inputs.to(self.device))
+        return train_data_labels, test_data_labels
+
+    @torch.no_grad()
+    def update_labels(self, inputs, batch_size, dt):
+        if not self.UpdateLabel:
+            return None
+        dt = int(dt)
+        labels = []
+        eval_batch_size = self._inference_batch_size(len(inputs), batch_size)
+        for i in range(0, len(inputs), eval_batch_size):
+            batch_inputs = inputs[i:i + eval_batch_size].to(self.device)
+            z_mean, _ = self.encode(batch_inputs)
+            labels += [self.decode(z_mean, dt).exp()]
+        labels = torch.cat(labels, dim=0)
+        max_pos = labels.argmax(1)
+        return F.one_hot(max_pos, num_classes=self.output_dim[dt])
+
+    @torch.no_grad()
+    def save_representative_parameters(self, path, index=0, dt=None):
+        dts = self.dt_list if dt is None else [int(dt)]
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        for one_dt in dts:
+            prefix = path + '_t=%d' % one_dt
+            np.save(prefix + '_representative_inputs' + str(index) + '.npy',
+                    self.representative_inputs[one_dt].cpu().data.numpy())
+            np.save(prefix + '_representative_weight' + str(index) + '.npy',
+                    self.representative_weights[dt_key(one_dt)](
+                        self.idle_input[one_dt]).cpu().data.numpy())
+            z_mean, z_logvar = self.get_representative_z(one_dt)
+            np.save(prefix + '_representative_z_mean' + str(index) + '.npy',
+                    z_mean.cpu().data.numpy())
+            np.save(prefix + '_representative_z_logvar' + str(index) + '.npy',
+                    z_logvar.cpu().data.numpy())
+
+    @torch.no_grad()
+    def save_traj_results(self, inputs, batch_size, path, SaveTrajResults,
+                          traj_index=0, index=1, dt=None):
+        dts = self.dt_list if dt is None else [int(dt)]
+        all_z_sample = []
+        all_z_mean = []
+        predictions = {one_dt: [] for one_dt in dts}
+        eval_batch_size = self._inference_batch_size(len(inputs), batch_size)
+        for i in range(0, len(inputs), eval_batch_size):
+            batch_inputs = inputs[i:i + eval_batch_size].to(self.device)
+            z_mean, z_logvar = self.encode(batch_inputs)
+            z_sample = self.reparameterize(z_mean, z_logvar)
+            all_z_sample += [z_sample.cpu()]
+            all_z_mean += [z_mean.cpu()]
+            for one_dt in dts:
+                predictions[one_dt] += [self.decode(z_mean, one_dt).exp().cpu()]
+
+        all_z_sample = torch.cat(all_z_sample, dim=0)
+        all_z_mean = torch.cat(all_z_mean, dim=0)
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+
+        if self.encoder_type == 'Linear':
+            np.save(path + '_z_mean_encoder_weight' + str(index) + '.npy',
+                    self.encoder_mean.weight.cpu().data.numpy())
+            np.save(path + '_z_mean_encoder_bias' + str(index) + '.npy',
+                    self.encoder_mean.bias.cpu().data.numpy())
+
+        if SaveTrajResults:
+            np.save(path + '_traj%d_representation' % traj_index + str(index) + '.npy',
+                    all_z_sample.cpu().data.numpy())
+            np.save(path + '_traj%d_mean_representation' % traj_index + str(index) + '.npy',
+                    all_z_mean.cpu().data.numpy())
+
+        lag_results = {}
+        for one_dt in dts:
+            all_prediction = torch.cat(predictions[one_dt], dim=0)
+            max_pos = all_prediction.argmax(1)
+            labels = F.one_hot(max_pos, num_classes=self.output_dim[one_dt])
+            population = torch.sum(labels, dim=0).float() / len(inputs)
+            prefix = path + '_t=%d_traj%d' % (one_dt, traj_index)
+            np.save(prefix + '_state_population' + str(index) + '.npy',
+                    population.cpu().data.numpy())
+            if SaveTrajResults:
+                np.save(prefix + '_labels' + str(index) + '.npy', labels.cpu().data.numpy())
+                np.save(prefix + '_data_prediction' + str(index) + '.npy',
+                        all_prediction.cpu().data.numpy())
+            hist = self.convergence_history.get(one_dt, [])
+            if len(hist) > 0:
+                np.save(path + '_t=%d_convergence_history' % one_dt + str(index) + '.npy',
+                        np.asarray(hist, dtype=np.float64))
+            lag_results[one_dt] = {
+                "prediction": all_prediction,
+                "labels": labels,
+                "population": population,
+            }
+
+        self.save_representative_parameters(path, index=index)
+        return lag_results

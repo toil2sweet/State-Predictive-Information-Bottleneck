@@ -50,6 +50,22 @@ export PYTHONPATH="${SPIB_INTERACTIVE_CODE_ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-4}"
 export NSCC_PROJECT_ROOT="${SPIB_INTERACTIVE_PROJECT_ROOT}"
 
+_spib_link_trpcage_data() {
+    local src="${SPIB_INTERACTIVE_PROJECT_ROOT}/data/trpcage"
+    local dest="${SPIB_INTERACTIVE_CODE_ROOT}/trpcage"
+    local f
+    [[ -d "${src}" ]] || return 0
+    mkdir -p "${dest}"
+    for f in traj_data.npy data_mean.npy data_std.npy \
+        init_label_tica_kmeans200_lag200.npy tica_projection_lag200.npy; do
+        if [[ -e "${src}/${f}" ]]; then
+            ln -sfn "${src}/${f}" "${dest}/${f}"
+        fi
+    done
+}
+
+_spib_link_trpcage_data
+
 spib_run() {
     local config="${1:-examples/Four_Well_hsic_config.ini}"
     local run_stamp run_id output_root log_file status code_version base_commit tracked_state
@@ -62,6 +78,8 @@ spib_run() {
         echo "Missing config: ${SPIB_INTERACTIVE_CODE_ROOT}/${config}" >&2
         return 1
     }
+
+    _spib_link_trpcage_data
 
     code_version="$(tr -d '[:space:]' <"${SPIB_INTERACTIVE_CODE_ROOT}/VERSION" 2>/dev/null || true)"
     [[ -n "${code_version}" ]] || code_version=unversioned
@@ -84,6 +102,23 @@ spib_run() {
 
     export SPIB_OUTPUT_DIR="${output_root}/SPIB"
     export SPIB_FIG_DIR="${output_root}/fig"
+
+    _spib_write_last_run() {
+        local state="$1"
+        mkdir -p "${SPIB_INTERACTIVE_PROJECT_ROOT}/results/spib"
+        {
+            echo "state=${state}"
+            echo "run_id=${run_id}"
+            echo "fig_dir=${output_root}/fig"
+            echo "output=${output_root}"
+            echo "log=${log_file}"
+            echo "config=${config}"
+            echo "exit_status=${status:-}"
+            echo "updated_at_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        } >"${SPIB_INTERACTIVE_PROJECT_ROOT}/results/spib/.nscc-last-run"
+    }
+    status=""
+    _spib_write_last_run running
 
     {
         echo "===== SPIB NSCC interactive run ====="
@@ -114,6 +149,7 @@ spib_run() {
     echo "interactive_run=${run_id}"
     echo "log=${log_file}"
     echo "output=${output_root}"
+    _spib_write_last_run finished
     return "${status}"
 }
 

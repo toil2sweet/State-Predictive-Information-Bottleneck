@@ -39,8 +39,8 @@ python test_model_advanced.py -config examples/Double_Well_hsic_config.ini
 
 | 体系 | 准备脚本 | 配置 |
 |------|----------|------|
-| Müller（斜排） | `muller/prepare_spib_data.py`（`xy_kmeans` / `tica_kmeans` / `x_bins`） | `examples/Muller_hsic_plus_config.ini` |
-| Trp-cage | `trpcage/prepare_spib_data.py`（下载 + TICA+kmeans + mean/std） | `examples/TrpCage_hsic_plus_config.ini` |
+| Müller（斜排） | `muller/prepare_spib_data.py`（`xy_kmeans` K=20） | `examples/Muller_hsic_config.ini` / `examples/Muller_hsic_plus_config.ini` |
+| Trp-cage | `trpcage/prepare_spib_data.py`（本地 DESRES DCD → 153 距离 + TICA+kmeans + mean/std） | 2024 原文基线：`examples/TrpCage_sample_plus_config.ini`；HSIC：`examples/TrpCage_hsic_plus_hku_config.ini` |
 
 ### 可视化
 
@@ -57,12 +57,16 @@ python test_model_advanced.py -config examples/Double_Well_hsic_config.ini
 
 ```bash
 # Müller HSIC-SPIB+
-python muller/prepare_spib_data.py --method xy_kmeans --n-clusters 12
+python muller/prepare_spib_data.py --method xy_kmeans --n-clusters 20
+python test_model_advanced.py -config examples/Muller_hsic_config.ini
 python test_model_advanced.py -config examples/Muller_hsic_plus_config.ini
 
-# Trp-cage HSIC-SPIB+（首次需下载 ~639MB）
+# Trp-cage 2024 SPIB 基线（本地 DESRES DCD）
 python trpcage/prepare_spib_data.py
-python test_model_advanced.py -config examples/TrpCage_hsic_plus_config.ini
+python test_model_advanced.py -config examples/TrpCage_sample_plus_config.ini
+
+# Trp-cage HSIC-SPIB+（同一套 traj_data / 初标）
+python test_model_advanced.py -config examples/TrpCage_hsic_plus_hku_config.ini
 ```
 
 大文件已列入根目录 `.gitignore`（`trpcage/*.npy` 等）。

@@ -296,12 +296,17 @@ def test_model():
                 ts_mask = np.load(ts_mask_path)
                 name_prefix = "%s_HSIC_SPIB_TS_d=%d_t=%d_b=%.4f_traj0_seed%d" % (
                     loss_mode, RC_dim, dt, beta, seed)
+                ts_top1, ts_top2 = plot_transition_states.load_decoder_top_pairs(
+                    None, ts_mask_path.replace("_mask.npy", "_top2.npy"))
                 ts_figs = plot_transition_states.plot_all_ts_figures(
                     traj_np, labels_np, ts_mask, fig_dir, name_prefix,
                     fe_beta=float(hsic_config.get("fe_beta", 3.0)),
                     potential=hsic_config.get("ts_potential", "four_well"),
                     fe_vmax=hsic_config.get("fe_vmax", None),
-                    dpi=150)
+                    dpi=150,
+                    ts_top1=ts_top1,
+                    ts_top2=ts_top2,
+                    ridge_top_k=hsic_config.get("ts_plot_ridge_top_k"))
                 for kind, path, n_ts in ts_figs:
                     print("Saved %s plot: %s (n_TS=%d)" % (kind, path, n_ts))
     

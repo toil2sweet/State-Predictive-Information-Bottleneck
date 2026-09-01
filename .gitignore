@@ -1,7 +1,9 @@
 # Large trajectory / label caches (do not commit)
 trpcage/*.npy
 trpcage/**/*.npy
+trpcage/prepare_meta.json
 !trpcage/prepare_spib_data.py
+!trpcage/__init__.py
 
 muller/init_label_kmeans*.npy
 muller/init_label_tica*.npy

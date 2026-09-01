@@ -21,9 +21,60 @@ import hsic_utils
 # Data Processing
 # ------------------------------------------------------------------------------
 
-def data_init(t0, dt, traj_data, traj_label, traj_weights):
+def data_init(t0, dt, traj_data, traj_label, traj_weights,
+              split_mode="random_frames", num_blocks=100):
+    """
+    Build time-lagged train/test arrays.
+
+    ``random_frames`` preserves this repository's historical split.  The
+    ``trajectory_blocks`` mode matches tutorial3_trpcage.ipynb: divide a long
+    trajectory into contiguous blocks, reserve randomly selected whole blocks
+    for testing, and form time-lagged pairs within each block.
+    """
     assert len(traj_data)==len(traj_label)
-    
+
+    if split_mode == "trajectory_blocks":
+        if num_blocks < 2:
+            raise ValueError("trajectory_blocks requires num_blocks >= 2")
+        if traj_weights is not None:
+            assert len(traj_data) == len(traj_weights)
+
+        n_frames = len(traj_data)
+        block_indices = list(range(num_blocks))
+        np.random.shuffle(block_indices)
+        split = int(np.floor(0.1 * num_blocks))
+        train_indices, test_indices = block_indices[split:], block_indices[:split]
+
+        def make_split(indices):
+            past_parts, future_parts, label_parts, weight_parts = [], [], [], []
+            for block_idx in indices:
+                start = int(block_idx * n_frames / num_blocks)
+                stop = int((block_idx + 1) * n_frames / num_blocks)
+                if stop - start <= t0 + dt:
+                    raise ValueError(
+                        "Block %d is too short for t0=%d and dt=%d"
+                        % (block_idx, t0, dt))
+                past_parts.append(traj_data[start + t0:stop - dt])
+                future_parts.append(traj_data[start + t0 + dt:stop])
+                label_parts.append(traj_label[start + t0 + dt:stop])
+                if traj_weights is not None:
+                    weight_parts.append(traj_weights[start + t0:stop - dt])
+
+            weights = torch.cat(weight_parts, dim=0) if weight_parts else None
+            return (torch.cat(past_parts, dim=0), torch.cat(future_parts, dim=0),
+                    torch.cat(label_parts, dim=0), weights)
+
+        past_data_train, future_data_train, label_train, weights_train = make_split(train_indices)
+        past_data_test, future_data_test, label_test, weights_test = make_split(test_indices)
+        return (past_data_train.shape[1:], past_data_train, future_data_train,
+                label_train, weights_train, past_data_test, future_data_test,
+                label_test, weights_test)
+
+    if split_mode != "random_frames":
+        raise ValueError(
+            "Unknown split_mode %r (use random_frames or trajectory_blocks)"
+            % split_mode)
+
     # skip the first t0 data
     past_data = traj_data[t0:(len(traj_data)-dt)]
     future_data = traj_data[(t0+dt):len(traj_data)]
@@ -63,6 +114,111 @@ def data_init(t0, dt, traj_data, traj_label, traj_weights):
         past_data_test, future_data_test, label_test, weights_test
 
 
+def data_init_mtl(t0, dt_list, traj_data, traj_label, traj_weights,
+                  split_mode="random_frames", num_blocks=100):
+    """Build aligned multi-lag arrays that share the same X_t frames.
+
+    Past frames are truncated to ``T - t0 - max(dt)`` so every Δt head sees
+    the same encoder inputs. Future frames / labels remain lag-specific.
+    """
+    assert len(traj_data) == len(traj_label)
+    dt_list = [int(dt) for dt in dt_list]
+    if len(dt_list) < 1:
+        raise ValueError("dt_list must be non-empty")
+    dt_max = max(dt_list)
+    n_frames = len(traj_data)
+    if n_frames <= t0 + dt_max:
+        raise ValueError(
+            "Trajectory length %d is too short for t0=%d and dt_max=%d"
+            % (n_frames, t0, dt_max))
+
+    def split_block_frames(start, stop):
+        if stop - start <= t0 + dt_max:
+            raise ValueError(
+                "Block [%d, %d) is too short for t0=%d and dt_max=%d"
+                % (start, stop, t0, dt_max))
+        past = traj_data[start + t0:stop - dt_max]
+        futures, labels, weights = {}, {}, None
+        for dt in dt_list:
+            futures[dt] = traj_data[start + t0 + dt:stop - dt_max + dt]
+            labels[dt] = traj_label[start + t0 + dt:stop - dt_max + dt]
+        if traj_weights is not None:
+            weights = traj_weights[start + t0:stop - dt_max]
+        return past, futures, labels, weights
+
+    if split_mode == "trajectory_blocks":
+        if num_blocks < 2:
+            raise ValueError("trajectory_blocks requires num_blocks >= 2")
+        if traj_weights is not None:
+            assert len(traj_data) == len(traj_weights)
+        block_indices = list(range(num_blocks))
+        np.random.shuffle(block_indices)
+        split = int(np.floor(0.1 * num_blocks))
+        train_indices, test_indices = block_indices[split:], block_indices[:split]
+
+        def make_split(indices):
+            past_parts = []
+            future_parts = {dt: [] for dt in dt_list}
+            label_parts = {dt: [] for dt in dt_list}
+            weight_parts = []
+            for block_idx in indices:
+                start = int(block_idx * n_frames / num_blocks)
+                stop = int((block_idx + 1) * n_frames / num_blocks)
+                past, futures, labels, weights = split_block_frames(start, stop)
+                past_parts.append(past)
+                for dt in dt_list:
+                    future_parts[dt].append(futures[dt])
+                    label_parts[dt].append(labels[dt])
+                if weights is not None:
+                    weight_parts.append(weights)
+            return (
+                torch.cat(past_parts, dim=0),
+                {dt: torch.cat(future_parts[dt], dim=0) for dt in dt_list},
+                {dt: torch.cat(label_parts[dt], dim=0) for dt in dt_list},
+                torch.cat(weight_parts, dim=0) if weight_parts else None,
+            )
+
+        past_train, future_train, label_train, weights_train = make_split(train_indices)
+        past_test, future_test, label_test, weights_test = make_split(test_indices)
+        return {
+            "data_shape": past_train.shape[1:],
+            "past_train": past_train,
+            "past_test": past_test,
+            "future_train": future_train,
+            "future_test": future_test,
+            "label_train": label_train,
+            "label_test": label_test,
+            "weights_train": weights_train,
+            "weights_test": weights_test,
+        }
+
+    if split_mode != "random_frames":
+        raise ValueError(
+            "Unknown split_mode %r (use random_frames or trajectory_blocks)"
+            % split_mode)
+
+    past, futures, labels, weights = split_block_frames(0, n_frames)
+    n_data = len(past)
+    p = np.random.permutation(n_data)
+    past = past[p]
+    futures = {dt: futures[dt][p] for dt in dt_list}
+    labels = {dt: labels[dt][p] for dt in dt_list}
+    if weights is not None:
+        weights = weights[p]
+    n_train = (9 * n_data) // 10
+    return {
+        "data_shape": past.shape[1:],
+        "past_train": past[:n_train],
+        "past_test": past[n_train:],
+        "future_train": {dt: futures[dt][:n_train] for dt in dt_list},
+        "future_test": {dt: futures[dt][n_train:] for dt in dt_list},
+        "label_train": {dt: labels[dt][:n_train] for dt in dt_list},
+        "label_test": {dt: labels[dt][n_train:] for dt in dt_list},
+        "weights_train": None if weights is None else weights[:n_train],
+        "weights_test": None if weights is None else weights[n_train:],
+    }
+
+
 def default_hsic_config():
     """Default HSIC-SPIB / HSIC-SPIB+ options (including post-hoc TS detection)."""
     return {
@@ -93,6 +249,8 @@ def default_hsic_config():
         "fe_vmax": None,               # optional FE color ceiling; Müller default 8 in plotter
         # Must be set explicitly in config: four_well | double_well | muller
         "ts_potential": None,
+        # Plot-only ridge ranking of decoder-margin TS (Müller default 20)
+        "ts_plot_ridge_top_k": None,
     }
 
 
@@ -123,6 +281,30 @@ def count_metastable_states(state_population, eps_rho=0.0):
     n_states = int(torch.sum(active).item())
     active_indices = torch.nonzero(active, as_tuple=True)[0].tolist()
     return n_states, active_indices
+
+
+def _cross_state_neighborhood_mask(hard_labels, window):
+    """Mark frames whose temporal window straddles a hard-label boundary."""
+    hard = np.asarray(hard_labels)
+    if hard.ndim != 1:
+        raise ValueError("hard_labels must be one-dimensional")
+    n_frames = hard.shape[0]
+    cross = np.zeros(n_frames, dtype=bool)
+    window = int(window)
+    if window <= 0 or n_frames < 2:
+        return cross
+
+    # A boundary at ``i`` lies between i-1 and i.  It is visible from every
+    # frame t whose [t-window, t+window] neighborhood covers both sides.
+    boundaries = np.flatnonzero(hard[1:] != hard[:-1]) + 1
+    if boundaries.size == 0:
+        return cross
+    starts = np.maximum(0, boundaries - window)
+    stops = np.minimum(n_frames, boundaries + window)
+    delta = np.zeros(n_frames + 1, dtype=np.int64)
+    np.add.at(delta, starts, 1)
+    np.add.at(delta, stops, -1)
+    return np.cumsum(delta[:-1]) > 0
 
 
 def identify_transition_states(prediction, active_indices=None, eps_ts=0.1,
@@ -201,14 +383,9 @@ def identify_transition_states(prediction, active_indices=None, eps_ts=0.1,
     ts_mask = margin < float(eps_ts)
 
     if require_cross_state and window >= 0:
-        hard_active = top1  # hard label restricted to active top-1
-        cross = np.zeros(n_frames, dtype=bool)
-        for t in range(n_frames):
-            lo = max(0, t - window)
-            hi = min(n_frames, t + window + 1)
-            neigh = hard_active[lo:hi]
-            if np.unique(neigh).size >= 2:
-                cross[t] = True
+        # Vectorized boundary dilation keeps million-frame protein trajectories
+        # practical while matching the original neighborhood definition.
+        cross = _cross_state_neighborhood_mask(top1, window)
         ts_mask = ts_mask & cross
 
     n_ts = int(np.sum(ts_mask))
@@ -543,7 +720,7 @@ def select_ctc_style_ts_representatives(
 # ------------------------------------------------------------------------------
 
 def calculate_loss(IB, data_inputs, data_targets, data_weights, beta=1.0, hsic_config=None,
-                   compute_kl=None):
+                   compute_kl=None, dt=None):
     """
     Multi-mode loss for SPIB / HSIC-SPIB.
 
@@ -554,8 +731,14 @@ def calculate_loss(IB, data_inputs, data_targets, data_weights, beta=1.0, hsic_c
     cfg = _resolve_hsic_config(hsic_config, beta)
     decoder_on_mean = bool(cfg["decoder_on_mean"]) and cfg["_use_hsic"]
 
-    outputs, z_sample, z_mean, z_logvar = IB.forward(
-        data_inputs, decoder_on_mean=decoder_on_mean)
+    if getattr(IB, "dt_list", None) is not None:
+        if dt is None:
+            raise ValueError("calculate_loss for SPIBMTL requires dt")
+        outputs, z_sample, z_mean, z_logvar = IB.forward(
+            data_inputs, dt=dt, decoder_on_mean=decoder_on_mean)
+    else:
+        outputs, z_sample, z_mean, z_logvar = IB.forward(
+            data_inputs, decoder_on_mean=decoder_on_mean)
 
     if data_weights is None:
         reconstruction_error = torch.mean(torch.sum(-data_targets * outputs, dim=1))
@@ -566,7 +749,10 @@ def calculate_loss(IB, data_inputs, data_targets, data_weights, beta=1.0, hsic_c
     if compute_kl is None:
         compute_kl = cfg["_use_kl"]
     if compute_kl:
-        log_p = IB.log_p(z_sample)
+        if getattr(IB, "dt_list", None) is not None:
+            log_p = IB.log_p(z_sample, dt=dt)
+        else:
+            log_p = IB.log_p(z_sample)
         log_q = -0.5 * torch.sum(z_logvar + torch.pow(z_sample - z_mean, 2)
                                  / torch.exp(z_logvar), dim=1)
         if data_weights is None:
@@ -641,7 +827,8 @@ def _epoch_sample_count(n_train, batch_size, epoch_sample_size):
 def train(IB, beta, train_past_data, train_future_data, init_train_data_labels, train_data_weights, \
           test_past_data, test_future_data, init_test_data_labels, test_data_weights, \
               learning_rate, lr_scheduler_step_size, lr_scheduler_gamma, batch_size, threshold, patience, refinements, output_path, log_interval, device, index,
-              hsic_config=None, epoch_sample_size=0):
+              hsic_config=None, epoch_sample_size=0, convergence_mode="population",
+              tolerance=None, max_epochs_per_refinement=0):
     IB.train()
     cfg = _resolve_hsic_config(hsic_config, beta)
     
@@ -653,17 +840,33 @@ def train(IB, beta, train_past_data, train_future_data, init_train_data_labels, 
     os.makedirs(os.path.dirname(IB_path), exist_ok=True)
 
     eps_rho = float(cfg.get("eps_rho", 0.0))
+    if convergence_mode not in ("population", "loss"):
+        raise ValueError(
+            "Unknown convergence_mode %r (use population or loss)"
+            % convergence_mode)
+    if convergence_mode == "loss":
+        if tolerance is None or float(tolerance) <= 0:
+            raise ValueError("loss convergence requires a positive tolerance")
+        tolerance = float(tolerance)
+    max_epochs_per_refinement = int(max_epochs_per_refinement or 0)
+    if max_epochs_per_refinement < 0:
+        raise ValueError("max_epochs_per_refinement must be >= 0")
     n_train = len(train_past_data)
-    n_epoch_samples = _epoch_sample_count(n_train, batch_size, epoch_sample_size)
+    # tutorial3 uses every train frame, including a final partial minibatch.
+    n_epoch_samples = (
+        n_train if convergence_mode == "loss" and not epoch_sample_size
+        else _epoch_sample_count(n_train, batch_size, epoch_sample_size))
     if n_epoch_samples < batch_size:
         raise ValueError(
             "Not enough training samples for batch_size=%d (n_train=%d, epoch_sample_size=%s)"
             % (batch_size, n_train, epoch_sample_size))
     print("loss_mode=%s lambda_y=%s beta_x=%s beta_kl=%s normalized_hsic=%s "
-          "decoder_on_mean=%s eps_rho=%s encoder_var_mode=%s epoch_sample_size=%d/%d" % (
+          "decoder_on_mean=%s eps_rho=%s encoder_var_mode=%s convergence_mode=%s "
+          "tolerance=%s max_epochs_per_refinement=%d epoch_sample_size=%d/%d" % (
         cfg["loss_mode"], cfg["lambda_y"], cfg["beta_x"], cfg["beta_kl"],
         cfg["normalized_hsic"], cfg["decoder_on_mean"], eps_rho,
         getattr(IB, "encoder_var_mode", cfg.get("encoder_var_mode", "input_dependent")),
+        convergence_mode, tolerance, max_epochs_per_refinement,
         n_epoch_samples, n_train),
           file=open(log_path, 'a'))
     print("SGD samples/epoch=%d of %d train frames (labels/TS still use all data)"
@@ -675,6 +878,7 @@ def train(IB, beta, train_past_data, train_future_data, init_train_data_labels, 
     update_times = 0
     unchanged_epochs = 0
     epoch = 0
+    train_epoch_loss0 = None
     IB.convergence_history = []
 
     # initial state population (used for state-number convergence)
@@ -690,11 +894,11 @@ def train(IB, beta, train_past_data, train_future_data, init_train_data_labels, 
     scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=lr_scheduler_step_size, gamma=lr_scheduler_gamma)
 
     while True:
-        
         train_permutation = torch.randperm(n_train)[:n_epoch_samples]
         test_permutation = torch.randperm(len(test_past_data))
-        
-        
+        train_epoch_loss_sum = 0.0
+        train_epoch_weight_sum = 0.0
+
         for i in range(0, n_epoch_samples, batch_size):
             step += 1
             
@@ -713,6 +917,13 @@ def train(IB, beta, train_past_data, train_future_data, init_train_data_labels, 
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
+
+            if batch_weights is None:
+                batch_weight_sum = float(len(batch_inputs))
+            else:
+                batch_weight_sum = float(batch_weights.detach().sum().item())
+            train_epoch_loss_sum += float(loss.detach().item()) * batch_weight_sum
+            train_epoch_weight_sum += batch_weight_sum
             
             if step % 500 == 0:
                 with torch.no_grad():
@@ -766,8 +977,37 @@ def train(IB, beta, train_past_data, train_future_data, init_train_data_labels, 
                 torch.save({'optimizer': optimizer.state_dict()},
                            IB_path+ '_%d_optim_cpt.pt'%step) 
 
-        epoch+=1
-        
+        epoch += 1
+        train_epoch_loss = train_epoch_loss_sum / max(train_epoch_weight_sum, 1.0)
+
+        if convergence_mode == "loss":
+            # tutorial3's SPIB.fit evaluates the complete test dataset each
+            # epoch and refines when the *mean training loss* plateaus.
+            test_epoch_loss_sum = 0.0
+            test_epoch_weight_sum = 0.0
+            with torch.no_grad():
+                for i in range(0, len(test_past_data), batch_size):
+                    batch_inputs, batch_outputs, batch_weights = sample_minibatch(
+                        test_past_data, test_data_labels, test_data_weights,
+                        torch.arange(i, min(i + batch_size, len(test_past_data)),
+                                     device=test_past_data.device),
+                        device)
+                    test_loss, _, _, _, _ = calculate_loss(
+                        IB, batch_inputs, batch_outputs, batch_weights, beta,
+                        hsic_config=cfg, compute_kl=True)
+                    if batch_weights is None:
+                        batch_weight_sum = float(len(batch_inputs))
+                    else:
+                        batch_weight_sum = float(batch_weights.detach().sum().item())
+                    test_epoch_loss_sum += float(test_loss.item()) * batch_weight_sum
+                    test_epoch_weight_sum += batch_weight_sum
+            test_epoch_loss = test_epoch_loss_sum / max(test_epoch_weight_sum, 1.0)
+            print("Epoch %d:\tTime %f s\nLoss (train) %f\nLoss (test) %f" % (
+                epoch, time.time() - start, train_epoch_loss, test_epoch_loss))
+            print("Epoch %d:\tTime %f s\nLoss (train) %f\nLoss (test) %f" % (
+                epoch, time.time() - start, train_epoch_loss, test_epoch_loss),
+                file=open(log_path, 'a'))
+
         # State-number path: label refinement still uses decoder probabilities
         # (never HSIC scores), preserving SPIB state pruning / C* estimation.
         new_train_data_labels = IB.update_labels(train_future_data, batch_size)
@@ -796,8 +1036,22 @@ def train(IB, beta, train_past_data, train_future_data, init_train_data_labels, 
             print("Update lr to %f"%(optimizer.param_groups[0]['lr']))
             print("Update lr to %f"%(optimizer.param_groups[0]['lr']), file=open(log_path, 'a'))
 
-        # check whether the change of the state population is smaller than the threshold
-        if state_population_change < threshold:
+        if convergence_mode == "loss":
+            training_loss_change = (
+                float("inf") if train_epoch_loss0 is None
+                else train_epoch_loss - train_epoch_loss0)
+            print("training loss change=%f" % training_loss_change)
+            print("training loss change=%f" % training_loss_change,
+                  file=open(log_path, 'a'))
+            converged = (
+                train_epoch_loss0 is not None
+                and abs(training_loss_change) < tolerance)
+        else:
+            converged = state_population_change < threshold
+
+        # The historical population criterion remains available for existing
+        # toy-system configurations.  The loss criterion matches tutorial3.
+        if converged:
             unchanged_epochs += 1
             
             if unchanged_epochs > patience:
@@ -851,6 +1105,15 @@ def train(IB, beta, train_past_data, train_future_data, init_train_data_labels, 
 
         else:
             unchanged_epochs = 0
+
+        train_epoch_loss0 = train_epoch_loss
+
+        if max_epochs_per_refinement and epoch >= max_epochs_per_refinement:
+            raise RuntimeError(
+                "No convergence after %d epochs at refinement %d "
+                "(mode=%s, threshold/tolerance=%s)"
+                % (epoch, update_times + 1, convergence_mode,
+                   tolerance if convergence_mode == "loss" else threshold))
 
         print("Epoch: %d\n"%(epoch))
         print("Epoch: %d\n"%(epoch), file=open(log_path, 'a'))
@@ -1003,3 +1266,493 @@ def output_final_result(IB, device, train_past_data, train_future_data, train_da
         
         final_result = np.array(final_result)
         np.save(final_result_path, final_result)
+
+
+def calculate_loss_mtl(IB, data_inputs, data_targets_by_dt, data_weights, dt_list,
+                       beta=1.0, hsic_config=None, compute_kl=None):
+    """Joint multi-lag loss: shared HSIC(Z,X) plus per-Δt CE and HSIC(Z,Y_τ)."""
+    cfg = _resolve_hsic_config(hsic_config, beta)
+    decoder_on_mean = bool(cfg["decoder_on_mean"]) and cfg["_use_hsic"]
+    dt_list = [int(dt) for dt in dt_list]
+    n_dt = len(dt_list)
+    if n_dt < 1:
+        raise ValueError("dt_list must be non-empty")
+
+    inputs = torch.flatten(data_inputs, start_dim=1)
+    z_mean, z_logvar = IB.encode(inputs)
+    z_sample = IB.reparameterize(z_mean, z_logvar)
+    z_for_decode = z_mean if decoder_on_mean else z_sample
+
+    reconstruction_error = data_inputs.new_zeros(())
+    hsic_zy = data_inputs.new_zeros(())
+    kl_loss = data_inputs.new_zeros(())
+    outputs_last = None
+    for dt in dt_list:
+        outputs = IB.decode(z_for_decode, dt)
+        outputs_last = outputs
+        targets = data_targets_by_dt[dt]
+        if data_weights is None:
+            ce = torch.mean(torch.sum(-targets * outputs, dim=1))
+        else:
+            ce = torch.mean(data_weights * torch.sum(-targets * outputs, dim=1))
+        reconstruction_error = reconstruction_error + ce
+
+    reconstruction_error = reconstruction_error / float(n_dt)
+
+    if compute_kl is None:
+        compute_kl = cfg["_use_kl"]
+    if compute_kl:
+        kl_sum = data_inputs.new_zeros(())
+        log_q = -0.5 * torch.sum(
+            z_logvar + torch.pow(z_sample - z_mean, 2) / torch.exp(z_logvar), dim=1)
+        for dt in dt_list:
+            log_p = IB.log_p(z_sample, dt=dt)
+            if data_weights is None:
+                kl_sum = kl_sum + torch.mean(log_q - log_p)
+            else:
+                kl_sum = kl_sum + torch.mean(data_weights * (log_q - log_p))
+        kl_loss = kl_sum / float(n_dt)
+
+    hsic_zx = data_inputs.new_zeros(())
+    if cfg["_use_hsic"]:
+        batch_size = data_inputs.size(0)
+        if batch_size > cfg["hsic_batch_warn"]:
+            warnings.warn(
+                "HSIC is O(B^2); current batch_size={} may be slow/memory-heavy.".format(
+                    batch_size))
+        z_for_hsic = z_mean
+        kz, _ = hsic_utils.build_kernel(
+            z_for_hsic, kernel_type=cfg["kernel_z"],
+            sigma=cfg["sigma_z"], detach_kernel=False)
+        kx, _ = hsic_utils.build_kernel(
+            inputs, kernel_type=cfg["kernel_x"],
+            sigma=cfg["sigma_x"], detach_kernel=True)
+        hsic_zx = hsic_utils.hsic_from_grams(kz, kx, normalized=cfg["normalized_hsic"])
+        hsic_zy_sum = data_inputs.new_zeros(())
+        for dt in dt_list:
+            ky, _ = hsic_utils.build_kernel(
+                data_targets_by_dt[dt], kernel_type=cfg["kernel_y"],
+                sigma=cfg["sigma_y"], detach_kernel=True)
+            hsic_zy_sum = hsic_zy_sum + hsic_utils.hsic_from_grams(
+                kz, ky, normalized=cfg["normalized_hsic"])
+        hsic_zy = hsic_zy_sum / float(n_dt)
+
+    loss = reconstruction_error
+    if cfg["_use_kl"]:
+        loss = loss + float(cfg["beta_kl"]) * kl_loss
+    if cfg["_use_hsic"]:
+        loss = loss - float(cfg["lambda_y"]) * hsic_zy + float(cfg["beta_x"]) * hsic_zx
+
+    zero = outputs_last.new_zeros(())
+    return (loss, reconstruction_error.float(),
+            kl_loss.float() if torch.is_tensor(kl_loss) else zero,
+            hsic_zx.float(), hsic_zy.float())
+
+
+def _sample_mtl_minibatch(past_data, labels_by_dt, data_weights, indices, dt_list, device):
+    sample_past = past_data[indices].to(device)
+    sample_labels = {dt: labels_by_dt[dt][indices].to(device) for dt in dt_list}
+    if data_weights is None:
+        sample_weights = None
+    else:
+        sample_weights = data_weights[indices].to(device)
+    return sample_past, sample_labels, sample_weights
+
+
+def train_mtl(IB, beta, train_past_data, train_future_by_dt, init_train_labels_by_dt,
+              train_data_weights, test_past_data, test_future_by_dt, init_test_labels_by_dt,
+              test_data_weights, dt_list, learning_rate, lr_scheduler_step_size,
+              lr_scheduler_gamma, batch_size, threshold, patience, refinements,
+              output_path, log_interval, device, index, hsic_config=None,
+              epoch_sample_size=0, convergence_mode="population", tolerance=None,
+              max_epochs_per_refinement=0):
+    """Joint multi-lag training of a shared-encoder / per-Δt-decoder SPIBMTL."""
+    IB.train()
+    cfg = _resolve_hsic_config(hsic_config, beta)
+    dt_list = [int(dt) for dt in dt_list]
+
+    step = 0
+    start = time.time()
+    log_path = output_path + '_train.log'
+    os.makedirs(os.path.dirname(log_path), exist_ok=True)
+    IB_path = output_path + "cpt" + str(index) + "/IB"
+    os.makedirs(os.path.dirname(IB_path), exist_ok=True)
+
+    eps_rho = float(cfg.get("eps_rho", 0.0))
+    if convergence_mode not in ("population", "loss"):
+        raise ValueError(
+            "Unknown convergence_mode %r (use population or loss)" % convergence_mode)
+    if convergence_mode == "loss":
+        if tolerance is None or float(tolerance) <= 0:
+            raise ValueError("loss convergence requires a positive tolerance")
+        tolerance = float(tolerance)
+    max_epochs_per_refinement = int(max_epochs_per_refinement or 0)
+    if max_epochs_per_refinement < 0:
+        raise ValueError("max_epochs_per_refinement must be >= 0")
+
+    n_train = len(train_past_data)
+    n_epoch_samples = (
+        n_train if convergence_mode == "loss" and not epoch_sample_size
+        else _epoch_sample_count(n_train, batch_size, epoch_sample_size))
+    if n_epoch_samples < batch_size:
+        raise ValueError(
+            "Not enough training samples for batch_size=%d (n_train=%d, epoch_sample_size=%s)"
+            % (batch_size, n_train, epoch_sample_size))
+
+    print("MTL dt_list=%s loss_mode=%s lambda_y=%s beta_x=%s beta_kl=%s "
+          "normalized_hsic=%s decoder_on_mean=%s eps_rho=%s encoder_var_mode=%s "
+          "convergence_mode=%s tolerance=%s max_epochs_per_refinement=%d "
+          "epoch_sample_size=%d/%d" % (
+              dt_list, cfg["loss_mode"], cfg["lambda_y"], cfg["beta_x"], cfg["beta_kl"],
+              cfg["normalized_hsic"], cfg["decoder_on_mean"], eps_rho,
+              getattr(IB, "encoder_var_mode", cfg.get("encoder_var_mode", "input_dependent")),
+              convergence_mode, tolerance, max_epochs_per_refinement,
+              n_epoch_samples, n_train),
+          file=open(log_path, 'a'))
+    print("MTL SGD samples/epoch=%d of %d shared train frames; dt=%s"
+          % (n_epoch_samples, n_train, dt_list))
+
+    train_labels = {dt: init_train_labels_by_dt[dt] for dt in dt_list}
+    test_labels = {dt: init_test_labels_by_dt[dt] for dt in dt_list}
+    update_times = 0
+    unchanged_epochs = 0
+    epoch = 0
+    train_epoch_loss0 = None
+    IB.convergence_history = {dt: [] for dt in dt_list}
+
+    state_population0 = {}
+    for dt in dt_list:
+        state_population0[dt] = (
+            torch.sum(train_labels[dt], dim=0).float() / train_labels[dt].shape[0])
+        n_states0, active_idx0 = count_metastable_states(
+            state_population0[dt], eps_rho=eps_rho)
+        print("dt=%d initial metastable state number: %d indices=%s" % (
+            dt, n_states0, active_idx0))
+        print("dt=%d initial metastable state number: %d indices=%s" % (
+            dt, n_states0, active_idx0), file=open(log_path, 'a'))
+
+    optimizer = torch.optim.Adam(IB.parameters(), lr=learning_rate)
+    scheduler = torch.optim.lr_scheduler.StepLR(
+        optimizer, step_size=lr_scheduler_step_size, gamma=lr_scheduler_gamma)
+
+    while True:
+        train_permutation = torch.randperm(n_train)[:n_epoch_samples]
+        test_permutation = torch.randperm(len(test_past_data))
+        train_epoch_loss_sum = 0.0
+        train_epoch_weight_sum = 0.0
+
+        for i in range(0, n_epoch_samples, batch_size):
+            step += 1
+            train_indices = train_permutation[i:i + batch_size]
+            batch_inputs, batch_outputs, batch_weights = _sample_mtl_minibatch(
+                train_past_data, train_labels, train_data_weights,
+                train_indices, dt_list, device)
+            loss, reconstruction_error, kl_loss, hsic_zx, hsic_zy = calculate_loss_mtl(
+                IB, batch_inputs, batch_outputs, batch_weights, dt_list,
+                beta, hsic_config=cfg)
+            if torch.isnan(loss).any():
+                return True
+
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+
+            if batch_weights is None:
+                batch_weight_sum = float(len(batch_inputs))
+            else:
+                batch_weight_sum = float(batch_weights.detach().sum().item())
+            train_epoch_loss_sum += float(loss.detach().item()) * batch_weight_sum
+            train_epoch_weight_sum += batch_weight_sum
+
+            if step % 500 == 0:
+                with torch.no_grad():
+                    loss, reconstruction_error, kl_loss, hsic_zx, hsic_zy = calculate_loss_mtl(
+                        IB, batch_inputs, batch_outputs, batch_weights, dt_list,
+                        beta, hsic_config=cfg, compute_kl=True)
+                    train_time = time.time() - start
+                    print(
+                        "Iteration %i:\tTime %f s\nLoss (train) %f\tKL loss (train): %f\n"
+                        "Reconstruction loss (train) %f\tHSIC_zx (train) %f\tHSIC_zy (train) %f" % (
+                            step, train_time, loss, kl_loss, reconstruction_error, hsic_zx, hsic_zy))
+                    print(
+                        "Iteration %i:\tTime %f s\nLoss (train) %f\tKL loss (train): %f\n"
+                        "Reconstruction loss (train) %f\tHSIC_zx (train) %f\tHSIC_zy (train) %f" % (
+                            step, train_time, loss, kl_loss, reconstruction_error, hsic_zx, hsic_zy),
+                        file=open(log_path, 'a'))
+                    j = i % len(test_permutation)
+                    test_indices = test_permutation[j:j + batch_size]
+                    batch_inputs, batch_outputs, batch_weights = _sample_mtl_minibatch(
+                        test_past_data, test_labels, test_data_weights,
+                        test_indices, dt_list, device)
+                    loss, reconstruction_error, kl_loss, hsic_zx, hsic_zy = calculate_loss_mtl(
+                        IB, batch_inputs, batch_outputs, batch_weights, dt_list,
+                        beta, hsic_config=cfg, compute_kl=True)
+                    print(
+                        "Loss (test) %f\tKL loss (test): %f\n"
+                        "Reconstruction loss (test) %f\tHSIC_zx (test) %f\tHSIC_zy (test) %f" % (
+                            loss, kl_loss, reconstruction_error, hsic_zx, hsic_zy))
+                    print(
+                        "Loss (test) %f\tKL loss (test): %f\n"
+                        "Reconstruction loss (test) %f\tHSIC_zx (test) %f\tHSIC_zy (test) %f" % (
+                            loss, kl_loss, reconstruction_error, hsic_zx, hsic_zy),
+                        file=open(log_path, 'a'))
+
+            if step % log_interval == 0:
+                torch.save({'step': step, 'state_dict': IB.state_dict(),
+                            'dt_list': dt_list}, IB_path + '_%d_cpt.pt' % step)
+                torch.save({'optimizer': optimizer.state_dict()},
+                           IB_path + '_%d_optim_cpt.pt' % step)
+
+        epoch += 1
+        train_epoch_loss = train_epoch_loss_sum / max(train_epoch_weight_sum, 1.0)
+
+        if convergence_mode == "loss":
+            test_epoch_loss_sum = 0.0
+            test_epoch_weight_sum = 0.0
+            with torch.no_grad():
+                for i in range(0, len(test_past_data), batch_size):
+                    batch_inputs, batch_outputs, batch_weights = _sample_mtl_minibatch(
+                        test_past_data, test_labels, test_data_weights,
+                        torch.arange(i, min(i + batch_size, len(test_past_data)),
+                                     device=test_past_data.device),
+                        dt_list, device)
+                    test_loss, _, _, _, _ = calculate_loss_mtl(
+                        IB, batch_inputs, batch_outputs, batch_weights, dt_list,
+                        beta, hsic_config=cfg, compute_kl=True)
+                    if batch_weights is None:
+                        batch_weight_sum = float(len(batch_inputs))
+                    else:
+                        batch_weight_sum = float(batch_weights.detach().sum().item())
+                    test_epoch_loss_sum += float(test_loss.item()) * batch_weight_sum
+                    test_epoch_weight_sum += batch_weight_sum
+            test_epoch_loss = test_epoch_loss_sum / max(test_epoch_weight_sum, 1.0)
+            print("Epoch %d:\tTime %f s\nLoss (train) %f\nLoss (test) %f" % (
+                epoch, time.time() - start, train_epoch_loss, test_epoch_loss))
+            print("Epoch %d:\tTime %f s\nLoss (train) %f\nLoss (test) %f" % (
+                epoch, time.time() - start, train_epoch_loss, test_epoch_loss),
+                file=open(log_path, 'a'))
+
+        new_train_labels = {}
+        n_states_by_dt = {}
+        pop_change_by_dt = {}
+        all_ok = True
+        for dt in dt_list:
+            if IB.UpdateLabel:
+                new_train_labels[dt] = IB.update_labels(
+                    train_future_by_dt[dt], batch_size, dt)
+            else:
+                new_train_labels[dt] = train_labels[dt]
+            state_population = (
+                torch.sum(new_train_labels[dt], dim=0).float() / new_train_labels[dt].shape[0])
+            n_states, active_idx = count_metastable_states(state_population, eps_rho=eps_rho)
+            n_states_by_dt[dt] = n_states
+            pop_change = torch.sqrt(torch.square(state_population - state_population0[dt]).sum())
+            pop_change_by_dt[dt] = pop_change
+            state_population0[dt] = state_population
+            print("dt=%d population=%s" % (dt, state_population.cpu().numpy()))
+            print("dt=%d population=%s" % (dt, state_population.cpu().numpy()),
+                  file=open(log_path, 'a'))
+            print("dt=%d metastable state number: %d indices=%s change=%f" % (
+                dt, n_states, active_idx, float(pop_change)))
+            print("dt=%d metastable state number: %d indices=%s change=%f" % (
+                dt, n_states, active_idx, float(pop_change)),
+                file=open(log_path, 'a'))
+            if n_states < 2:
+                all_ok = False
+
+        scheduler.step()
+        if scheduler.gamma < 1:
+            print("Update lr to %f" % (optimizer.param_groups[0]['lr']))
+            print("Update lr to %f" % (optimizer.param_groups[0]['lr']),
+                  file=open(log_path, 'a'))
+
+        if convergence_mode == "loss":
+            training_loss_change = (
+                float("inf") if train_epoch_loss0 is None
+                else train_epoch_loss - train_epoch_loss0)
+            print("training loss change=%f" % training_loss_change)
+            print("training loss change=%f" % training_loss_change,
+                  file=open(log_path, 'a'))
+            converged = (
+                train_epoch_loss0 is not None
+                and abs(training_loss_change) < tolerance)
+        else:
+            max_change = max(float(pop_change_by_dt[dt]) for dt in dt_list)
+            print("MTL max state population change=%f" % max_change)
+            print("MTL max state population change=%f" % max_change,
+                  file=open(log_path, 'a'))
+            converged = all(float(pop_change_by_dt[dt]) < threshold for dt in dt_list)
+
+        if converged:
+            unchanged_epochs += 1
+            if unchanged_epochs > patience:
+                if not all_ok:
+                    print("Only one metastable state is found for at least one Δt!")
+                    break
+                if IB.UpdateLabel and update_times < refinements:
+                    update_times += 1
+                    print("Update %d\n" % update_times)
+                    print("Update %d\n" % update_times, file=open(log_path, 'a'))
+                    for dt in dt_list:
+                        train_labels[dt] = new_train_labels[dt]
+                        test_labels[dt] = IB.update_labels(
+                            test_future_by_dt[dt], batch_size, dt)
+                        train_labels[dt], test_labels[dt] = IB.update_model(
+                            train_past_data, train_data_weights,
+                            train_labels[dt], test_labels[dt], batch_size,
+                            dt=dt, eps_rho=eps_rho,
+                            update_representative=bool(cfg["update_representative"]))
+                        IB.convergence_history[dt].append(
+                            [update_times, epoch, IB.output_dim[dt]])
+                        print("dt=%d after prune: output_dim=%d" % (dt, IB.output_dim[dt]))
+                        print("dt=%d after prune: output_dim=%d" % (dt, IB.output_dim[dt]),
+                              file=open(log_path, 'a'))
+                        state_population0[dt] = (
+                            torch.sum(train_labels[dt], dim=0).float()
+                            / train_labels[dt].shape[0])
+                    epoch = 0
+                    unchanged_epochs = 0
+                    optimizer = torch.optim.Adam(IB.parameters(), lr=learning_rate)
+                    scheduler = torch.optim.lr_scheduler.StepLR(
+                        optimizer, step_size=lr_scheduler_step_size,
+                        gamma=lr_scheduler_gamma)
+                else:
+                    break
+        else:
+            unchanged_epochs = 0
+
+        train_epoch_loss0 = train_epoch_loss
+        if max_epochs_per_refinement and epoch >= max_epochs_per_refinement:
+            raise RuntimeError(
+                "No convergence after %d epochs at refinement %d "
+                "(mode=%s, threshold/tolerance=%s)"
+                % (epoch, update_times + 1, convergence_mode,
+                   tolerance if convergence_mode == "loss" else threshold))
+        print("Epoch: %d\n" % epoch)
+        print("Epoch: %d\n" % epoch, file=open(log_path, 'a'))
+
+    if IB.UpdateLabel:
+        for dt in dt_list:
+            train_labels[dt] = IB.update_labels(train_future_by_dt[dt], batch_size, dt)
+            test_labels[dt] = IB.update_labels(test_future_by_dt[dt], batch_size, dt)
+            try:
+                train_labels[dt], test_labels[dt] = IB.update_model(
+                    train_past_data, train_data_weights,
+                    train_labels[dt], test_labels[dt], batch_size,
+                    dt=dt, eps_rho=eps_rho,
+                    update_representative=bool(cfg["update_representative"]))
+            except ValueError as exc:
+                print("dt=%d final prune skipped: %s" % (dt, exc))
+                print("dt=%d final prune skipped: %s" % (dt, exc),
+                      file=open(log_path, 'a'))
+
+    total_training_time = time.time() - start
+    print("Total training time: %f" % total_training_time)
+    print("Total training time: %f" % total_training_time, file=open(log_path, 'a'))
+    torch.save({'step': step, 'state_dict': IB.state_dict(), 'dt_list': dt_list},
+               IB_path + '_%d_cpt.pt' % step)
+    torch.save({'optimizer': optimizer.state_dict()},
+               IB_path + '_%d_optim_cpt.pt' % step)
+    torch.save({'step': step, 'state_dict': IB.state_dict(), 'dt_list': dt_list},
+               IB_path + '_final_cpt.pt')
+    torch.save({'optimizer': optimizer.state_dict()},
+               IB_path + '_final_optim_cpt.pt')
+    for dt in dt_list:
+        hist = IB.convergence_history.get(dt, [])
+        if len(hist) > 0:
+            np.save(output_path + '_t=%d_convergence_history%d.npy' % (dt, index),
+                    np.asarray(hist, dtype=np.float64))
+    return False
+
+
+@torch.no_grad()
+def output_final_result_mtl(IB, device, train_past_data, train_future_by_dt,
+                            train_labels_by_dt, train_data_weights, test_past_data,
+                            test_future_by_dt, test_labels_by_dt, test_data_weights,
+                            dt_list, batch_size, output_path, path, beta,
+                            learning_rate, index=0, hsic_config=None):
+    cfg = _resolve_hsic_config(hsic_config, beta)
+    dt_list = [int(dt) for dt in dt_list]
+    final_result_path = output_path + '_final_result' + str(index) + '.npy'
+    os.makedirs(os.path.dirname(final_result_path), exist_ok=True)
+
+    train_labels = dict(train_labels_by_dt)
+    test_labels = dict(test_labels_by_dt)
+    if IB.UpdateLabel:
+        for dt in dt_list:
+            train_labels[dt] = IB.update_labels(train_future_by_dt[dt], batch_size, dt)
+            test_labels[dt] = IB.update_labels(test_future_by_dt[dt], batch_size, dt)
+
+    def _eval_split(past_data, labels, weights):
+        loss = reconstruction_error = kl_loss = hsic_zx = hsic_zy = 0
+        n = len(past_data)
+        for i in range(0, n, batch_size):
+            batch_inputs, batch_outputs, batch_weights = _sample_mtl_minibatch(
+                past_data, labels, weights,
+                range(i, min(i + batch_size, n)), dt_list, IB.device)
+            loss1, rec1, kl1, zx1, zy1 = calculate_loss_mtl(
+                IB, batch_inputs, batch_outputs, batch_weights, dt_list,
+                beta, hsic_config=cfg)
+            loss += loss1 * len(batch_inputs)
+            reconstruction_error += rec1 * len(batch_inputs)
+            kl_loss += kl1 * len(batch_inputs)
+            hsic_zx += zx1 * len(batch_inputs)
+            hsic_zy += zy1 * len(batch_inputs)
+        return (loss / n, reconstruction_error / n, kl_loss / n,
+                hsic_zx / n, hsic_zy / n)
+
+    final_result = []
+    loss, reconstruction_error, kl_loss, hsic_zx, hsic_zy = _eval_split(
+        train_past_data, train_labels, train_data_weights)
+    final_result += [loss.data.cpu().numpy(), reconstruction_error.cpu().data.numpy(),
+                     kl_loss.cpu().data.numpy(), hsic_zx.cpu().data.numpy(),
+                     hsic_zy.cpu().data.numpy()]
+    print("Final MTL: %d\nLoss (train) %f\tKL loss (train): %f\n"
+          "Reconstruction loss (train) %f\tHSIC_zx (train) %f\tHSIC_zy (train) %f" % (
+              index, loss, kl_loss, reconstruction_error, hsic_zx, hsic_zy))
+    print("Final MTL: %d\nLoss (train) %f\tKL loss (train): %f\n"
+          "Reconstruction loss (train) %f\tHSIC_zx (train) %f\tHSIC_zy (train) %f" % (
+              index, loss, kl_loss, reconstruction_error, hsic_zx, hsic_zy),
+          file=open(path, 'a'))
+
+    loss, reconstruction_error, kl_loss, hsic_zx, hsic_zy = _eval_split(
+        test_past_data, test_labels, test_data_weights)
+    final_result += [loss.cpu().data.numpy(), reconstruction_error.cpu().data.numpy(),
+                     kl_loss.cpu().data.numpy(), hsic_zx.cpu().data.numpy(),
+                     hsic_zy.cpu().data.numpy()]
+    print("Loss (test) %f\tKL loss (test): %f\n"
+          "Reconstruction loss (test) %f\tHSIC_zx (test) %f\tHSIC_zy (test) %f"
+          % (loss, kl_loss, reconstruction_error, hsic_zx, hsic_zy))
+    print("Loss (test) %f\tKL loss (test): %f\n"
+          "Reconstruction loss (test) %f\tHSIC_zx (test) %f\tHSIC_zy (test) %f"
+          % (loss, kl_loss, reconstruction_error, hsic_zx, hsic_zy),
+          file=open(path, 'a'))
+    print("dt_list: %s\t Beta: %f\t Learning_rate: %f\t loss_mode: %s" % (
+        dt_list, beta, learning_rate, cfg["loss_mode"]))
+    print("dt_list: %s\t Beta: %f\t Learning_rate: %f\t loss_mode: %s" % (
+        dt_list, beta, learning_rate, cfg["loss_mode"]),
+          file=open(path, 'a'))
+
+    for dt in dt_list:
+        state_population = (
+            torch.sum(train_labels[dt], dim=0).float() / train_labels[dt].shape[0])
+        n_metastable, active_state_indices = count_metastable_states(
+            state_population, eps_rho=float(cfg.get("eps_rho", 0.0)))
+        print("dt=%d number of metastable states: %d" % (dt, n_metastable))
+        print("dt=%d state population: %s" % (dt, state_population.cpu().numpy()))
+        print("dt=%d active state indices: %s" % (dt, active_state_indices))
+        print("dt=%d number of metastable states: %d" % (dt, n_metastable),
+              file=open(path, 'a'))
+        print("dt=%d state population: %s" % (dt, state_population.cpu().numpy()),
+              file=open(path, 'a'))
+        print("dt=%d active state indices: %s" % (dt, active_state_indices),
+              file=open(path, 'a'))
+        hist = IB.convergence_history.get(dt, [])
+        if len(hist) > 0:
+            print("dt=%d convergence_history [refinement, epochs, n_states]: %s" % (
+                dt, hist))
+            print("dt=%d convergence_history [refinement, epochs, n_states]: %s" % (
+                dt, hist), file=open(path, 'a'))
+
+    np.save(final_result_path, np.array(final_result))
+    return train_labels, test_labels

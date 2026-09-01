@@ -183,6 +183,8 @@ SYNC_EXCLUDES=(
     --exclude=results/
     --exclude=logs/
     --exclude=wandb/
+    --exclude=*.npy
+    --exclude=trpcage/prepare_meta.json
 )
 RSYNC_OPTIONS=(-az --delete-delay --omit-dir-times --itemize-changes "${SYNC_EXCLUDES[@]}")
 [[ "${DRY_RUN}" == 0 ]] || RSYNC_OPTIONS+=(--dry-run)

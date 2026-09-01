@@ -31,6 +31,7 @@ source "${LOCAL_ROOT}/hku/target_config.sh"
 hku_load_target
 SSH_HOST="${HKU_SSH_HOST}"
 SESSION="${HKU_INTERACTIVE_SESSION}"
+CODE_ROOT="${HKU_RUNTIME_CODE_ROOT}"
 LAST_RUN="${HKU_PROJECT_ROOT%/}/results/spib/.hku-last-run"
 
 [[ -f "${LOCAL_ROOT}/${CONFIG}" ]] || {
@@ -64,7 +65,7 @@ done
     exit 1
 }
 
-printf -v run_cmd 'spib_run %q' "${CONFIG}"
+printf -v run_cmd 'cd %q && spib_run %q' "${CODE_ROOT}" "${CONFIG}"
 ssh "${SSH_HOST}" "tmux send-keys -t '${SESSION}' $(printf '%q' "${run_cmd}") C-m"
 
 finished=0

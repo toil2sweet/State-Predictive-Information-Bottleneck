@@ -11,8 +11,8 @@ usage() {
 Usage: hku/sync_code.sh [--dry-run]
 
 Synchronize the local hsic-spib working tree, Four-Well and Double-Well
-traj_gen files, double-well_CTC/*.npy trajectories and labels, and plotting
-scripts to:
+traj_gen files, double-well_CTC/*.npy trajectories and labels, prepared
+Müller and Trp-cage npy arrays, and plotting scripts to:
   /userhome/cs3/lidepeng/TS/State-Predictive-Information-Bottleneck
 
 Old versioned checkouts under TS are not overwritten.
@@ -133,6 +133,21 @@ if [[ -d double-well_CTC ]]; then
         printf '%s\0' "${path}" >>"${FILE_LIST}"
     done < <(find double-well_CTC -maxdepth 1 -type f -name '*.npy' -print0)
 fi
+# gitignore hides muller/*.npy; include the canonical xy_kmeans training arrays.
+if [[ -d muller ]]; then
+    while IFS= read -r -d '' path; do
+        printf '%s\0' "${path}" >>"${FILE_LIST}"
+    done < <(find muller -maxdepth 1 -type f \( \
+        -name 'traj_data.npy' -o -name 'init_label_kmeans20.npy' \) -print0)
+fi
+# gitignore hides trpcage/*.npy; include the prepared 2024 SPIB arrays.
+if [[ -d trpcage ]]; then
+    while IFS= read -r -d '' path; do
+        printf '%s\0' "${path}" >>"${FILE_LIST}"
+    done < <(find trpcage -maxdepth 1 -type f \( \
+        -name 'traj_data.npy' -o -name 'data_mean.npy' -o -name 'data_std.npy' \
+        -o -name 'init_label_tica_kmeans200_lag200_index.npy' \) -print0)
+fi
 
 rsync -a -r --from0 --files-from="${FILE_LIST}" \
     "${LOCAL_ROOT}/" "${STAGING_ROOT}/"
@@ -193,7 +208,8 @@ SYNC_EXCLUDES=(
     --exclude=wandb/
     --exclude=envs/
 )
-RSYNC_OPTIONS=(-az --omit-dir-times --itemize-changes "${SYNC_EXCLUDES[@]}")
+# Do not compress: Trp-cage float32 npy files are large and already dense.
+RSYNC_OPTIONS=(-a --omit-dir-times --itemize-changes "${SYNC_EXCLUDES[@]}")
 [[ "${DRY_RUN}" == 0 ]] || RSYNC_OPTIONS+=(--dry-run)
 rsync "${RSYNC_OPTIONS[@]}" "${STAGING_ROOT}/" "${SSH_HOST}:${REMOTE_ROOT}/"
 
@@ -203,7 +219,7 @@ if [[ "${DRY_RUN}" == 1 ]]; then
     exit 0
 fi
 
-VERIFY_OUTPUT="$(rsync -aznci --omit-dir-times "${SYNC_EXCLUDES[@]}" \
+VERIFY_OUTPUT="$(rsync -anci --omit-dir-times "${SYNC_EXCLUDES[@]}" \
     "${STAGING_ROOT}/" "${SSH_HOST}:${REMOTE_ROOT}/")"
 if [[ -n "${VERIFY_OUTPUT}" ]]; then
     echo "HKU runtime verification failed; remaining differences:" >&2

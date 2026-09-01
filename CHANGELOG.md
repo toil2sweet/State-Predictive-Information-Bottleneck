@@ -6,6 +6,28 @@ milestones.
 
 ## Unreleased
 
+## 0.5.0 - 2026-09-01
+
+- Add shared encoder and multi-head decoders for Trp-cage.
+
+- Identify Müller transition states with population-normalized decoder margin K_i/ρ_i so the isocommittor is not pinned to the shallow well.
+- Rank Müller decoder-margin TS overlays by high empirical F or analytical V per state pair without changing saved ts_mask.
+- Generate unused Müller xy-kmeans K=30 labels alongside the loaded K=20 set.
+- Add Müller xy-kmeans K=20 labels and point both configs plus HKU sync at them.
+- Align Müller HSIC configs with Four-Well/Double-Well Linear 16/16, eps_ts=0.005, and CTC-style TS.
+- Keep only Müller xy-kmeans K=10 labels and point both Müller configs at them.
+- Regenerate Müller 10-state x-bin and xy-kmeans labels for HSIC-SPIB and HSIC-SPIB+.
+- Draw Trp-cage MTL free-energy+TS with the tutorial3 latent recipe on one shared (IB_0, IB_1) grid.
+- Add Trp-cage HKU MTL config for dt=[50, 100, 500] and plot combined lag figures in the shared 2D SPIB latent.
+- Add shared-encoder multi-lag HSIC-SPIB training with per-Δt decoders and combined Four-Well figures.
+- Align Trp-cage HSIC-SPIB+ with the converged coarse SPIB protocol and reduce normalized-HSIC regularization for stable refinement.
+- Align Trp-cage SPIB refinement with tutorial3 loss tolerance and contiguous-block validation split.
+- Enable Trp-cage decoder-margin transition-state detection with SPIB-latent free-energy and metastable-state overlays.
+- Sync prepared Trp-cage arrays to HKU and keep spib_run at the runtime root.
+- Add tutorial3-style Trp-cage FE/label plots and NSCC project-storage data sync for interactive spib_run.
+- Add original 2024 SPIB Trp-cage baseline from local DESRES Anton DCDs.
+- Milestone tag: `shared_encoder_multihead_decoders_trpcage`.
+
 ## 0.4.0 - 2026-08-26
 
 - Add CTC-style three-level transition-state representatives, comparison plots, and HKU figure directories.

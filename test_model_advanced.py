@@ -18,9 +18,181 @@ import SPIB_training
 import plot_state_labels
 import plot_transition_states
 import plot_spib_plus
+import plot_mtl
 
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 default_device = torch.device("cpu")
+
+
+def _load_initial_labels(path, device):
+    """Load (T, C) one-hot labels, or expand (T,) class indices on device."""
+    arr = np.load(path)
+    if arr.ndim == 2:
+        return torch.from_numpy(np.asarray(arr)).float().to(device)
+    if arr.ndim != 1:
+        raise ValueError(
+            "Initial labels must be (T,) class indices or (T, C) one-hot: %s" % path)
+    n_classes = int(arr.max()) + 1
+    idx = torch.from_numpy(np.asarray(arr, dtype=np.int64)).to(device)
+    return torch.nn.functional.one_hot(idx, num_classes=n_classes).float()
+
+
+def _concat_mtl_splits(split_list):
+    """Concatenate per-trajectory MTL splits along the sample axis."""
+    dt_list = list(split_list[0]["label_train"].keys())
+    past_train = torch.cat([item["past_train"] for item in split_list], dim=0)
+    past_test = torch.cat([item["past_test"] for item in split_list], dim=0)
+    if split_list[0]["weights_train"] is None:
+        weights_train = None
+        weights_test = None
+    else:
+        weights_train = torch.cat([item["weights_train"] for item in split_list], dim=0)
+        weights_test = torch.cat([item["weights_test"] for item in split_list], dim=0)
+    return {
+        "data_shape": split_list[0]["data_shape"],
+        "past_train": past_train,
+        "past_test": past_test,
+        "future_train": {
+            dt: torch.cat([item["future_train"][dt] for item in split_list], dim=0)
+            for dt in dt_list
+        },
+        "future_test": {
+            dt: torch.cat([item["future_test"][dt] for item in split_list], dim=0)
+            for dt in dt_list
+        },
+        "label_train": {
+            dt: torch.cat([item["label_train"][dt] for item in split_list], dim=0)
+            for dt in dt_list
+        },
+        "label_test": {
+            dt: torch.cat([item["label_test"][dt] for item in split_list], dim=0)
+            for dt in dt_list
+        },
+        "weights_train": weights_train,
+        "weights_test": weights_test,
+    }
+
+
+def _evaluate_mtl_trajectory(
+        IB, traj_np, traj_tensor, batch_size, output_path, traj_index, seed,
+        dt_list, run_hsic_config, ctc_ts_config, SaveTrajResults, SaveLabelPlot,
+        fig_dir, fig_prefix, method_label, RC_dim, beta, final_result_path):
+    """Save per-Δt npy results, detect TS, and write combined lag figures."""
+    IB.save_traj_results(
+        traj_tensor, batch_size, output_path, SaveTrajResults, traj_index, seed)
+    pot = run_hsic_config.get("ts_potential", None)
+    # histogram2d on residue distances (or any D>2 feature) is not a valid
+    # configuration-space density for CTC-style representatives.
+    skip_ctc = (
+        pot in ("trpcage", "trp_cage", "protein")
+        or (np.asarray(traj_np).ndim == 2 and np.asarray(traj_np).shape[1] > 2))
+    lag_plot_payload = []
+    for dt in dt_list:
+        ts_result = None
+        ctc_ts_result = None
+        pred_path = output_path + "_t=%d_traj%d_data_prediction%d.npy" % (
+            dt, traj_index, seed)
+        pop_path = output_path + "_t=%d_traj%d_state_population%d.npy" % (
+            dt, traj_index, seed)
+        labels_path = output_path + "_t=%d_traj%d_labels%d.npy" % (
+            dt, traj_index, seed)
+        if SaveTrajResults and run_hsic_config.get("DetectTransitionStates", False):
+            if os.path.isfile(pred_path):
+                ts_prefix = output_path + "_t=%d_traj%d_ts%d" % (dt, traj_index, seed)
+                ts_result = SPIB_training.save_and_report_transition_states(
+                    pred_path,
+                    population_path=pop_path if os.path.isfile(pop_path) else None,
+                    output_prefix=ts_prefix,
+                    eps_ts=float(run_hsic_config.get("eps_ts", 0.1)),
+                    require_cross_state=bool(
+                        run_hsic_config.get("ts_require_cross_state", True)),
+                    window=int(run_hsic_config.get("ts_window", 1)),
+                    log_path=final_result_path)
+                print("dt=%d Number of metastable states: %d" % (
+                    dt, ts_result.get("n_metastable", -1)))
+                print("dt=%d Number of metastable states: %d" % (
+                    dt, ts_result.get("n_metastable", -1)),
+                      file=open(final_result_path, 'a'))
+                if ctc_ts_config["enabled"] and not skip_ctc:
+                    ctc_ts_result = SPIB_training.select_ctc_style_ts_representatives(
+                        traj_np, ts_result, output_prefix=ts_prefix,
+                        top_k=ctc_ts_config["top_k"],
+                        event_max_gap=ctc_ts_config["event_max_gap"],
+                        min_event_frames=ctc_ts_config["min_event_frames"],
+                        density_method=ctc_ts_config["density_method"],
+                        density_bins=ctc_ts_config["density_bins"],
+                        selection_scope=ctc_ts_config["selection_scope"],
+                        state_pairs=ctc_ts_config["state_pairs"],
+                        log_path=final_result_path)
+        ts_mask = None
+        if ts_result is not None:
+            ts_mask = ts_result["ts_mask"]
+        elif SaveTrajResults:
+            ts_mask_path = output_path + "_t=%d_traj%d_ts%d_mask.npy" % (
+                dt, traj_index, seed)
+            if os.path.isfile(ts_mask_path):
+                ts_mask = np.load(ts_mask_path)
+        labels_np = np.load(labels_path) if os.path.isfile(labels_path) else None
+        if labels_np is not None:
+            if ts_mask is None:
+                ts_mask = np.zeros(labels_np.shape[0], dtype=bool)
+            lag_plot_payload.append({
+                "dt": dt,
+                "labels": labels_np,
+                "ts_mask": ts_mask,
+                "ctc_mask": None if ctc_ts_result is None else ctc_ts_result["selected_mask"],
+            })
+
+    if not (SaveTrajResults and SaveLabelPlot and lag_plot_payload):
+        return
+    mean_rep_path = output_path + "_traj%d_mean_representation%d.npy" % (
+        traj_index, seed)
+    plot_traj, xlabel, ylabel, skip_analytical_potential = plot_mtl.plot_coordinates(
+        traj_np, latent_path=mean_rep_path, ts_potential=pot)
+    n_plot = plot_traj.shape[0]
+    for item in lag_plot_payload:
+        if item["labels"].shape[0] != n_plot:
+            raise ValueError(
+                "MTL label/plot length mismatch at dt=%d: %d vs %d"
+                % (item["dt"], item["labels"].shape[0], n_plot))
+        if item["ts_mask"].shape[0] != n_plot:
+            raise ValueError(
+                "MTL TS-mask/plot length mismatch at dt=%d: %d vs %d"
+                % (item["dt"], item["ts_mask"].shape[0], n_plot))
+    dt_tag = SPIB.dt_tag(dt_list)
+    name_prefix = "%s_MTL_%s_d=%d_t=%s_b=%.4f_traj%d_seed%d" % (
+        run_hsic_config.get("loss_mode", "hsic_spib"), fig_prefix,
+        RC_dim, dt_tag, beta, traj_index, seed)
+    fig_style = "latent" if skip_analytical_potential else "config"
+    mtl_figs = plot_mtl.plot_all_mtl_figures(
+        plot_traj, lag_plot_payload, fig_dir, name_prefix,
+        fe_beta=float(run_hsic_config.get("fe_beta", 3.0)),
+        potential=None if skip_analytical_potential else pot,
+        fe_vmax=run_hsic_config.get("fe_vmax", None),
+        dpi=150,
+        xlabel=xlabel, ylabel=ylabel, style=fig_style)
+    for kind, path in mtl_figs:
+        msg = "Saved MTL %s plot: %s" % (kind, path)
+        print(msg)
+        print(msg, file=open(final_result_path, 'a'))
+    if (not skip_ctc and ctc_ts_config["enabled"] and ctc_ts_config["save_plots"]
+            and all(item.get("ctc_mask") is not None for item in lag_plot_payload)):
+        ctc_payload = [
+            {"dt": item["dt"], "labels": item["labels"], "ts_mask": item["ctc_mask"]}
+            for item in lag_plot_payload
+        ]
+        ctc_prefix = name_prefix + "_CTCstyle"
+        ctc_figs = plot_mtl.plot_all_mtl_figures(
+            plot_traj, ctc_payload, fig_dir, ctc_prefix,
+            fe_beta=float(run_hsic_config.get("fe_beta", 3.0)),
+            potential=None if skip_analytical_potential else pot,
+            fe_vmax=run_hsic_config.get("fe_vmax", None),
+            dpi=150,
+            xlabel=xlabel, ylabel=ylabel, style=fig_style)
+        for kind, path in ctc_figs:
+            msg = "Saved MTL CTC-style %s plot: %s" % (kind, path)
+            print(msg)
+            print(msg, file=open(final_result_path, 'a'))
 
 
 def test_model_advanced():
@@ -66,6 +238,16 @@ def test_model_advanced():
 
         # Threshold in terms of the change of the predicted state population for measuring the convergence of training
         threshold = float(config.get("Training Parameters","threshold"))
+
+        # ``loss`` matches spib_msm tutorial3's tolerance-driven refinement;
+        # ``population`` preserves the legacy repository behavior.
+        convergence_mode = config.get(
+            "Training Parameters", "convergence_mode", fallback="population").strip().lower()
+        tolerance = None
+        if config.has_option("Training Parameters", "tolerance"):
+            tolerance = float(config.get("Training Parameters", "tolerance"))
+        max_epochs_per_refinement = int(config.get(
+            "Training Parameters", "max_epochs_per_refinement", fallback="0"))
 
         # Number of epochs with the change of the state population smaller than the threshold after which this iteration of training finishes
         patience = int(config.get("Training Parameters","patience"))
@@ -131,6 +313,9 @@ def test_model_advanced():
                 hsic_config["fe_vmax"] = float(config.get("HSIC-SPIB", "fe_vmax"))
             if config.has_option("HSIC-SPIB", "ts_potential"):
                 hsic_config["ts_potential"] = config.get("HSIC-SPIB", "ts_potential")
+            if config.has_option("HSIC-SPIB", "ts_plot_ridge_top_k"):
+                hsic_config["ts_plot_ridge_top_k"] = int(
+                    config.get("HSIC-SPIB", "ts_plot_ridge_top_k"))
             if config.has_option("HSIC-SPIB", "eps_rho"):
                 hsic_config["eps_rho"] = float(config.get("HSIC-SPIB", "eps_rho"))
             if config.has_option("HSIC-SPIB", "encoder_var_mode"):
@@ -171,6 +356,8 @@ def test_model_advanced():
         traj_data_path = config.get("Data","traj_data")
         traj_data_path = traj_data_path.replace('[','').replace(']','')
         traj_data_path = [os.path.expandvars(path.strip()) for path in traj_data_path.split(',')]
+        split_mode = config.get("Data", "split_mode", fallback="random_frames").strip().lower()
+        split_num_blocks = int(config.get("Data", "split_num_blocks", fallback="100"))
 
         # Load the data
         traj_data_list = [torch.from_numpy(np.load(file_path)).float().to(device) for file_path in traj_data_path]
@@ -191,8 +378,11 @@ def test_model_advanced():
         initial_labels_path = initial_labels_path.replace('[','').replace(']','')
         initial_labels_path = [os.path.expandvars(path.strip()) for path in initial_labels_path.split(',')]
         
-        traj_labels_list = [torch.from_numpy(np.load(file_path)).float().to(device) for file_path in initial_labels_path]
+        traj_labels_list = [
+            _load_initial_labels(file_path, device) for file_path in initial_labels_path]
         
+        if traj_labels_list[0].ndim != 2:
+            raise ValueError("Initial labels must be one-hot (T, C) after loading")
         output_dim = traj_labels_list[0].shape[1]
         
         assert len(traj_data_list)==len(traj_labels_list)
@@ -272,16 +462,105 @@ def test_model_advanced():
         torch.manual_seed(seed)
         random.seed(seed)
 
+        if len(dt_list) > 1:
+            split_list = []
+            for i in range(len(traj_data_list)):
+                weights = None if traj_weights_list is None else traj_weights_list[i]
+                split_list.append(SPIB_training.data_init_mtl(
+                    t0, dt_list, traj_data_list[i], traj_labels_list[i], weights,
+                    split_mode=split_mode, num_blocks=split_num_blocks))
+            mtl_data = _concat_mtl_splits(split_list)
+            for RC_dim in RC_dim_list:
+                for neuron_num1 in neuron_num1_list:
+                    for neuron_num2 in neuron_num2_list:
+                        for beta in beta_list:
+                            for learning_rate in learning_rate_list:
+                                output_path = IB_path + "_d=%d_t=%s_b=%.4f_learn=%f_%s" % (
+                                    RC_dim, SPIB.dt_tag(dt_list), beta, learning_rate,
+                                    hsic_config["loss_mode"])
+                                run_hsic_config = dict(hsic_config)
+                                run_hsic_config["beta_kl"] = beta
+                                IB = SPIB.SPIBMTL(
+                                    encoder_type, RC_dim, output_dim,
+                                    mtl_data["data_shape"], device, dt_list,
+                                    UpdateLabel, neuron_num1, neuron_num2,
+                                    data_transform=data_transform,
+                                    encoder_var_mode=hsic_config.get(
+                                        "encoder_var_mode", "input_dependent"))
+                                IB.to(device)
+                                IB.init_representative_inputs(
+                                    mtl_data["past_train"], mtl_data["label_train"])
+                                train_result = SPIB_training.train_mtl(
+                                    IB, beta, mtl_data["past_train"],
+                                    mtl_data["future_train"], mtl_data["label_train"],
+                                    mtl_data["weights_train"], mtl_data["past_test"],
+                                    mtl_data["future_test"], mtl_data["label_test"],
+                                    mtl_data["weights_test"], dt_list, learning_rate,
+                                    lr_scheduler_step_size, lr_scheduler_gamma,
+                                    batch_size, threshold, patience, refinements,
+                                    output_path, log_interval, device, seed,
+                                    hsic_config=run_hsic_config,
+                                    epoch_sample_size=epoch_sample_size,
+                                    convergence_mode=convergence_mode,
+                                    tolerance=tolerance,
+                                    max_epochs_per_refinement=max_epochs_per_refinement)
+                                if train_result:
+                                    return
+                                SPIB_training.output_final_result_mtl(
+                                    IB, device, mtl_data["past_train"],
+                                    mtl_data["future_train"], mtl_data["label_train"],
+                                    mtl_data["weights_train"], mtl_data["past_test"],
+                                    mtl_data["future_test"], mtl_data["label_test"],
+                                    mtl_data["weights_test"], dt_list, batch_size,
+                                    output_path, final_result_path, beta,
+                                    learning_rate, seed, hsic_config=run_hsic_config)
+                                loss_mode = run_hsic_config.get("loss_mode", "original_spib")
+                                is_plus = (
+                                    run_hsic_config.get("eps_rho", 0) not in (0, 0.0)
+                                    or run_hsic_config.get("encoder_var_mode") == "isotropic"
+                                    or data_transform is not None
+                                    or "plus" in os.path.basename(
+                                        sys.argv[sys.argv.index('-config') + 1]).lower()
+                                )
+                                if is_plus:
+                                    fig_prefix = (
+                                        "SPIB_plus" if loss_mode == "original_spib"
+                                        else "HSIC_SPIB_plus")
+                                    method_label = (
+                                        "SPIB+" if loss_mode == "original_spib"
+                                        else "HSIC-SPIB+")
+                                else:
+                                    fig_prefix = (
+                                        "SPIB" if loss_mode == "original_spib"
+                                        else "HSIC_SPIB")
+                                    method_label = (
+                                        "SPIB" if loss_mode == "original_spib"
+                                        else "HSIC-SPIB")
+                                for i in range(len(traj_data_list)):
+                                    traj_np = traj_data_list[i].detach().cpu().numpy()
+                                    _evaluate_mtl_trajectory(
+                                        IB, traj_np, traj_data_list[i], batch_size,
+                                        output_path, i, seed, dt_list, run_hsic_config,
+                                        ctc_ts_config, SaveTrajResults, SaveLabelPlot,
+                                        fig_dir, fig_prefix, method_label, RC_dim,
+                                        beta, final_result_path)
+            continue
+
         for dt in dt_list:
             data_init_list = [] 
             if traj_weights_list == None:
                 for i in range(len(traj_data_list)):
-                    data_init_list+=[SPIB_training.data_init(t0, dt, traj_data_list[i], traj_labels_list[i], None)]
+                    data_init_list += [SPIB_training.data_init(
+                        t0, dt, traj_data_list[i], traj_labels_list[i], None,
+                        split_mode=split_mode, num_blocks=split_num_blocks)]
                 train_data_weights = None
                 test_data_weights = None
             else:
                 for i in range(len(traj_data_list)):
-                    data_init_list+=[SPIB_training.data_init(t0, dt, traj_data_list[i], traj_labels_list[i], traj_weights_list[i])]
+                    data_init_list += [SPIB_training.data_init(
+                        t0, dt, traj_data_list[i], traj_labels_list[i],
+                        traj_weights_list[i], split_mode=split_mode,
+                        num_blocks=split_num_blocks)]
 
                 train_data_weights = torch.cat([data_init_list[i][4] for i in range(len(traj_data_list))], dim=0)
                 test_data_weights = torch.cat([data_init_list[i][8] for i in range(len(traj_data_list))], dim=0)
@@ -326,7 +605,10 @@ def test_model_advanced():
                                                                     test_data_labels, test_data_weights, learning_rate, lr_scheduler_step_size, lr_scheduler_gamma,\
                                                                         batch_size, threshold, patience, refinements, output_path, \
                                                                             log_interval, device, seed, hsic_config=run_hsic_config,
-                                                                            epoch_sample_size=epoch_sample_size)
+                                                                            epoch_sample_size=epoch_sample_size,
+                                                                            convergence_mode=convergence_mode,
+                                                                            tolerance=tolerance,
+                                                                            max_epochs_per_refinement=max_epochs_per_refinement)
                                 
                                 if train_result:
                                     return
@@ -377,35 +659,57 @@ def test_model_advanced():
                                         if os.path.isfile(labels_path):
                                             traj_np = traj_data_list[i].detach().cpu().numpy()
                                             labels_np = np.load(labels_path)
-                                            fig_prefix = "HSIC_SPIB_plus" if (
+                                            loss_mode = run_hsic_config.get(
+                                                "loss_mode", "original_spib")
+                                            is_plus = (
                                                 run_hsic_config.get("eps_rho", 0) not in (0, 0.0)
                                                 or run_hsic_config.get("encoder_var_mode") == "isotropic"
                                                 or data_transform is not None
                                                 or "plus" in os.path.basename(
                                                     sys.argv[sys.argv.index('-config') + 1]).lower()
-                                            ) else "HSIC_SPIB"
+                                            )
+                                            if is_plus:
+                                                fig_prefix = (
+                                                    "SPIB_plus" if loss_mode == "original_spib"
+                                                    else "HSIC_SPIB_plus")
+                                                method_label = (
+                                                    "SPIB+" if loss_mode == "original_spib"
+                                                    else "HSIC-SPIB+")
+                                            else:
+                                                fig_prefix = (
+                                                    "SPIB" if loss_mode == "original_spib"
+                                                    else "HSIC_SPIB")
+                                                method_label = (
+                                                    "SPIB" if loss_mode == "original_spib"
+                                                    else "HSIC-SPIB")
                                             fig_name = "%s_learned_labels_d=%d_t=%d_b=%.4f_traj%d_seed%d.png" % (
                                                 fig_prefix, RC_dim, dt, beta, i, seed)
                                             if hsic_config.get("loss_mode"):
                                                 fig_name = "%s_%s" % (hsic_config["loss_mode"], fig_name)
                                             fig_path = os.path.join(fig_dir, fig_name)
-                                            title = "SPIB learned labels (dt=%d, traj=%d)" % (dt, i)
+                                            title = "%s learned labels (dt=%d, traj=%d)" % (
+                                                method_label, dt, i)
                                             pot = run_hsic_config.get("ts_potential", None)
                                             if pot in ("double_well", "dw"):
-                                                title = "HSIC-SPIB double-well labels (dt=%d)" % dt
+                                                title = "%s double-well labels (dt=%d)" % (
+                                                    method_label, dt)
                                             elif pot in ("four_well", "fw"):
-                                                title = "HSIC-SPIB four-well labels (dt=%d)" % dt
+                                                title = "%s four-well labels (dt=%d)" % (
+                                                    method_label, dt)
                                             elif pot in ("muller", "muller_brown", "mb"):
-                                                title = "HSIC-SPIB+ Müller labels (dt=%d)" % dt
+                                                title = "%s Müller labels (dt=%d)" % (
+                                                    method_label, dt)
                                             elif pot in ("trpcage", "trp_cage", "protein"):
-                                                title = "HSIC-SPIB+ Trp-cage labels (dt=%d)" % dt
+                                                title = "%s Trp-cage labels (dt=%d)" % (
+                                                    method_label, dt)
                                             # For high-dim protein traj, plot in SPIB latent if available
                                             plot_traj = traj_np
                                             mean_rep_path = output_path + "_traj%d_mean_representation%d.npy" % (i, seed)
                                             if traj_np.ndim == 2 and traj_np.shape[1] > 2 and os.path.isfile(mean_rep_path):
                                                 plot_traj = np.load(mean_rep_path)
                                                 if pot in ("trpcage", "trp_cage", "protein"):
-                                                    title = "HSIC-SPIB+ Trp-cage latent labels (dt=%d)" % dt
+                                                    title = "%s Trp-cage latent labels (dt=%d)" % (
+                                                        method_label, dt)
                                             saved, active, pop = plot_state_labels.plot_learned_state_labels(
                                                 plot_traj, labels_np, fig_path, title=title)
                                             print("Saved learned state-label plot: %s (n_states=%d, indices=%s)" % (
@@ -414,12 +718,22 @@ def test_model_advanced():
                                                 saved, len(active), active.tolist()),
                                                 file=open(final_result_path, 'a'))
 
-                                            # HSIC-SPIB+: latent FE / labels + state-number vs refinement
-                                            if fig_prefix == "HSIC_SPIB_plus" and os.path.isfile(mean_rep_path):
+                                            # Protein / plus protocol: latent FE / labels + state-number vs refinement
+                                            if fig_prefix.endswith("_plus") and os.path.isfile(mean_rep_path):
                                                 z_lat = np.load(mean_rep_path)
                                                 hist_path = output_path + "_convergence_history%d.npy" % seed
                                                 conv = np.load(hist_path) if os.path.isfile(hist_path) else (
                                                     IB.convergence_history if len(IB.convergence_history) > 0 else None)
+                                                ts_mask_path = output_path + "_traj%d_ts%d_mask.npy" % (i, seed)
+                                                latent_ts_mask = None
+                                                if (run_hsic_config.get("DetectTransitionStates", False)
+                                                        and os.path.isfile(ts_mask_path)):
+                                                    latent_ts_mask = np.load(ts_mask_path)
+                                                    if latent_ts_mask.shape[0] != z_lat.shape[0]:
+                                                        raise ValueError(
+                                                            "Latent/TS length mismatch for traj %d: %d vs %d"
+                                                            % (i, z_lat.shape[0],
+                                                               latent_ts_mask.shape[0]))
                                                 plus_prefix = "%s_%s_d=%d_t=%d_b=%.4f_traj%d_seed%d" % (
                                                     hsic_config.get("loss_mode", "hsic"),
                                                     fig_prefix, RC_dim, dt, beta, i, seed)
@@ -428,9 +742,12 @@ def test_model_advanced():
                                                     labels_np, conv, fig_dir, plus_prefix,
                                                     fe_beta=float(run_hsic_config.get("fe_beta", 1.0)),
                                                     fe_vmax=run_hsic_config.get("fe_vmax", None),
-                                                    dpi=150)
+                                                    dpi=150,
+                                                    method_label=method_label,
+                                                    ts_mask=latent_ts_mask)
                                                 for kind, path in plus_figs:
-                                                    msg = "Saved HSIC-SPIB+ %s plot: %s" % (kind, path)
+                                                    msg = "Saved %s %s plot: %s" % (
+                                                        method_label, kind, path)
                                                     print(msg)
                                                     print(msg, file=open(final_result_path, 'a'))
 
@@ -452,12 +769,19 @@ def test_model_advanced():
                                                         "Skip potential+TS plot: set [HSIC-SPIB] "
                                                         "ts_potential = four_well|double_well|muller")
                                                     pot = None
+                                                ts_top1, ts_top2 = plot_transition_states.load_decoder_top_pairs(
+                                                    ts_result,
+                                                    ts_mask_path.replace("_mask.npy", "_top2.npy"))
                                                 ts_figs = plot_transition_states.plot_all_ts_figures(
                                                     traj_np, labels_np, ts_mask, fig_dir, name_prefix,
                                                     fe_beta=float(run_hsic_config.get("fe_beta", 3.0)),
                                                     potential=pot,
                                                     fe_vmax=run_hsic_config.get("fe_vmax", None),
-                                                    dpi=150)
+                                                    dpi=150,
+                                                    ts_top1=ts_top1,
+                                                    ts_top2=ts_top2,
+                                                    ridge_top_k=run_hsic_config.get(
+                                                        "ts_plot_ridge_top_k"))
                                                 for kind, path, n_ts in ts_figs:
                                                     msg = "Saved %s plot: %s (n_TS=%d)" % (
                                                         kind, path, n_ts)
@@ -483,7 +807,8 @@ def test_model_advanced():
                                                         potential=pot,
                                                         fe_vmax=run_hsic_config.get("fe_vmax", None),
                                                         dpi=150,
-                                                        title_prefix="CTC-style %s representatives" % title_selection)
+                                                        title_prefix="CTC-style %s representatives" % title_selection,
+                                                        ridge_top_k=0)
                                                     for kind, path, n_ts in ctc_figs:
                                                         msg = "Saved CTC-style %s plot: %s (n_TS=%d)" % (
                                                             kind, path, n_ts)
